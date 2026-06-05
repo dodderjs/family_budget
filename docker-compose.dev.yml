@@ -1,0 +1,74 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: family-budget-db
+    environment:
+      MARIADB_ROOT_PASSWORD: rootpassword
+      MARIADB_DATABASE: family_budget
+      MARIADB_USER: budget_user
+      MARIADB_PASSWORD: budget_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data/mariadb:/var/lib/mysql
+    networks:
+      - budget_network
+    healthcheck:
+      test: [
+        "CMD-SHELL",
+        "mariadb-admin ping -h localhost -u root -p$${MARIADB_ROOT_PASSWORD} || exit 1"
+      ]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 90s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: family-budget-api
+    environment:
+      DATABASE_URL: mysql+pymysql://budget_user:budget_password@mariadb:3306/family_budget
+      PYTHONUNBUFFERED: 1
+      DEBUG: 1
+    ports:
+      - "8000:8000"
+      - "5678:5678"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    networks:
+      - budget_network
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8000 || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 20s
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: family-budget-web
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      VITE_API_URL: http://localhost:8000/api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - budget_network
+    command: npm run dev
+
+networks:
+  budget_network:
+    driver: bridge

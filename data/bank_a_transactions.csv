@@ -1,0 +1,25 @@
+Transaction Date,Amount,Description,Merchant,Currency
+2024-01-05,150.00,Whole Foods Market,Grocery Store,USD
+2024-01-06,-1200.00,Monthly Rent Payment,Property Management,USD
+2024-01-08,3500.00,Salary Deposit,Employer Inc,USD
+2024-01-10,-45.50,Electric Company Bill,Utilities,USD
+2024-01-12,-85.25,Uber Trip,Transport,USD
+2024-01-15,-65.00,Cinema Tickets,Entertainment,USD
+2024-01-18,-120.00,Supermarket,Grocery Store,USD
+2024-01-20,-50.00,Gas Station,Transport,USD
+2024-01-25,-200.00,Restaurant Dinner,Entertainment,USD
+2024-02-05,-180.00,Costco,Grocery Store,USD
+2024-02-06,-1200.00,Monthly Rent Payment,Property Management,USD
+2024-02-08,3500.00,Salary Deposit,Employer Inc,USD
+2024-02-10,-55.30,Water Bill,Utilities,USD
+2024-02-12,-100.50,Taxi,Transport,USD
+2024-02-15,-75.00,Concert Tickets,Entertainment,USD
+2024-02-18,-95.00,Whole Foods,Grocery Store,USD
+2024-02-20,-42.00,Metro Card,Transport,USD
+2024-02-25,-150.00,Restaurant,Entertainment,USD
+2024-03-05,-160.00,Grocery Store,Grocery Store,USD
+2024-03-06,-1200.00,Monthly Rent,Property Management,USD
+2024-03-08,3500.00,Salary,Employer Inc,USD
+2024-03-10,-62.50,Internet Bill,Utilities,USD
+2024-03-15,-120.00,Entertainment,Entertainment,USD
+2024-03-20,-85.00,Gas,Transport,USD
