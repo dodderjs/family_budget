@@ -6,7 +6,7 @@ from app.models.schemas import (
     UploadRequest, TransactionResponse, TransactionUpdate,
     AccountCreate, AccountResponse, AnalyticsSummary, TrainingDataCreate
 )
-from app.services.transaction_service import TransactionService
+from app.services.transaction_service import TransactionService, DuplicateTransactionError
 from app.services.normalization import normalize_transaction, should_skip_row
 from app.services.format_service import get_mapping_for_format, suggest_mapping, read_csv_rows
 from app.models.transaction import Account, Transaction, TrainingData
@@ -81,10 +81,9 @@ def normalize_transactions(
             continue
         try:
             normalized = normalize_transaction(row, mapping, request.account_id)
-            transaction = TransactionService.create_transaction(db, normalized)
-            if transaction:
-                created += 1
-        except ValueError as e:
+            TransactionService.create_transaction(db, normalized)
+            created += 1
+        except DuplicateTransactionError:
             duplicates += 1
         except Exception as e:
             errors.append(str(e))

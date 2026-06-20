@@ -5,19 +5,24 @@ from app.services.ml_service import predictor
 from datetime import datetime
 import json
 
+
+class DuplicateTransactionError(Exception):
+    """Raised when a transaction with the same hash_fingerprint already exists."""
+
+
 class TransactionService:
     @staticmethod
     def create_transaction(db: Session, transaction_data: dict) -> Transaction:
         """Create a new transaction with ML prediction"""
-        
+
         # Check for duplicate
         existing = db.query(Transaction).filter(
             Transaction.hash_fingerprint == transaction_data["hash_fingerprint"]
         ).first()
-        
+
         if existing:
-            return existing
-        
+            raise DuplicateTransactionError(transaction_data["hash_fingerprint"])
+
         # Predict category
         category, confidence = predictor.predict(transaction_data["description"])
         
