@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from app.models.transaction import Transaction, TrainingData, Account
 from app.models.schemas import TransactionCreate, TransactionResponse
 from app.services.ml_service import predictor
+from app.services.normalization import detect_transfers
 from datetime import datetime
 import json
 
@@ -47,6 +48,33 @@ class TransactionService:
         return db_transaction
     
     @staticmethod
+    def detect_and_flag_transfers(db: Session) -> int:
+        """
+        Find transfer pairs among not-yet-flagged transactions across all
+        accounts and mark them is_transfer=True with a transfer_match_id.
+        Returns the number of pairs flagged.
+        """
+        candidates = db.query(Transaction).filter(Transaction.is_transfer == False).all()
+        candidate_dicts = [
+            {"id": t.id, "account_id": t.account_id, "amount": t.amount, "date": t.date}
+            for t in candidates
+        ]
+        pairs = detect_transfers(candidate_dicts)
+
+        by_id = {t.id: t for t in candidates}
+        for id1, id2 in pairs:
+            t1, t2 = by_id[id1], by_id[id2]
+            t1.is_transfer = True
+            t1.transfer_match_id = t2.id
+            t2.is_transfer = True
+            t2.transfer_match_id = t1.id
+
+        if pairs:
+            db.commit()
+
+        return len(pairs)
+
+    @staticmethod
     def get_transactions(db: Session, account_id: str = None, limit: int = 100, offset: int = 0):
         """Get transactions with optional filtering"""
         query = db.query(Transaction)
@@ -91,8 +119,8 @@ class TransactionService:
     @staticmethod
     def get_analytics_summary(db: Session, account_id: str = None):
         """Get analytics summary"""
-        query = db.query(Transaction)
-        
+        query = db.query(Transaction).filter(Transaction.is_transfer == False)
+
         if account_id:
             query = query.filter(Transaction.account_id == account_id)
         
@@ -121,8 +149,8 @@ class TransactionService:
     @staticmethod
     def get_category_breakdown(db: Session, account_id: str = None):
         """Get breakdown by category"""
-        query = db.query(Transaction)
-        
+        query = db.query(Transaction).filter(Transaction.is_transfer == False)
+
         if account_id:
             query = query.filter(Transaction.account_id == account_id)
         
@@ -141,8 +169,8 @@ class TransactionService:
     @staticmethod
     def get_monthly_trends(db: Session, account_id: str = None):
         """Get monthly income/expense trends"""
-        query = db.query(Transaction)
-        
+        query = db.query(Transaction).filter(Transaction.is_transfer == False)
+
         if account_id:
             query = query.filter(Transaction.account_id == account_id)
         

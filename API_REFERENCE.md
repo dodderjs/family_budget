@@ -122,12 +122,24 @@ Content-Type: application/json
   "created": 23,
   "duplicates": 2,
   "skipped": 1,
+  "transfers_detected": 3,
   "errors": [],
   "status": "success"
 }
 ```
 `skipped` counts rows excluded by format-specific rules (e.g. Revolut
 `PENDING`/`REVERTED` transactions) rather than ingested or rejected.
+
+`transfers_detected` is the number of transfer *pairs* found and flagged
+after this batch was ingested. After every successful ingest, the importer
+scans all not-yet-flagged transactions **across every account** (not just the
+one just uploaded) for pairs with equal-and-opposite amounts, different
+`account_id`s, and dates within 2 days of each other — e.g. a withdrawal from
+checking matched to a top-up on a card account. Matched pairs get
+`is_transfer: true` and `transfer_match_id` set to each other's id, and are
+excluded from `/analytics/summary`, `/analytics/breakdown`, and
+`/analytics/trends` so an internal transfer isn't double-counted as both an
+expense and income.
 
 ---
 

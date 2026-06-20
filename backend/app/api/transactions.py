@@ -88,10 +88,13 @@ def normalize_transactions(
         except Exception as e:
             errors.append(str(e))
 
+    transfers_detected = TransactionService.detect_and_flag_transfers(db) if created else 0
+
     return {
         "created": created,
         "duplicates": duplicates,
         "skipped": skipped,
+        "transfers_detected": transfers_detected,
         "errors": errors,
         "status": "success"
     }

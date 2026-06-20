@@ -1,7 +1,7 @@
 import pytest
 
 from app.services.format_service import get_mapping_for_format
-from app.services.normalization import normalize_transaction, should_skip_row
+from app.services.normalization import detect_transfers, normalize_transaction, should_skip_row
 
 
 def test_revolut_card_payment_is_negative():
@@ -140,3 +140,55 @@ def test_malformed_amount_raises_value_error():
     row = {"Started Date": "2024-12-31 10:10:20", "Description": "Lidl", "Amount": "not-a-number", "Currency": "HUF"}
     with pytest.raises(ValueError):
         normalize_transaction(row, mapping, "acc-1")
+
+
+def test_detect_transfers_matches_cross_account_opposite_pair():
+    transactions = [
+        {"id": "t1", "account_id": "checking", "amount": -50000.0, "date": "2025-01-10"},
+        {"id": "t2", "account_id": "savings", "amount": 50000.0, "date": "2025-01-10"},
+    ]
+    assert detect_transfers(transactions) == [("t1", "t2")]
+
+
+def test_detect_transfers_ignores_same_account_pairs():
+    # Same account, equal-and-opposite amount (e.g. a purchase + an unrelated
+    # refund) must not be flagged as an inter-account transfer.
+    transactions = [
+        {"id": "t1", "account_id": "checking", "amount": -50000.0, "date": "2025-01-10"},
+        {"id": "t2", "account_id": "checking", "amount": 50000.0, "date": "2025-01-10"},
+    ]
+    assert detect_transfers(transactions) == []
+
+
+def test_detect_transfers_requires_opposite_signs():
+    transactions = [
+        {"id": "t1", "account_id": "checking", "amount": -50000.0, "date": "2025-01-10"},
+        {"id": "t2", "account_id": "savings", "amount": -50000.0, "date": "2025-01-10"},
+    ]
+    assert detect_transfers(transactions) == []
+
+
+def test_detect_transfers_respects_day_window():
+    close = [
+        {"id": "t1", "account_id": "checking", "amount": -1000.0, "date": "2025-01-10"},
+        {"id": "t2", "account_id": "savings", "amount": 1000.0, "date": "2025-01-12"},
+    ]
+    assert detect_transfers(close, max_day_diff=2) == [("t1", "t2")]
+
+    far = [
+        {"id": "t1", "account_id": "checking", "amount": -1000.0, "date": "2025-01-01"},
+        {"id": "t2", "account_id": "savings", "amount": 1000.0, "date": "2025-01-29"},
+    ]
+    assert detect_transfers(far, max_day_diff=2) == []
+
+
+def test_detect_transfers_each_transaction_matched_at_most_once():
+    transactions = [
+        {"id": "t1", "account_id": "checking", "amount": -1000.0, "date": "2025-01-10"},
+        {"id": "t2", "account_id": "savings", "amount": 1000.0, "date": "2025-01-10"},
+        {"id": "t3", "account_id": "credit_card", "amount": 1000.0, "date": "2025-01-10"},
+    ]
+    pairs = detect_transfers(transactions)
+    assert len(pairs) == 1
+    matched_ids = {i for pair in pairs for i in pair}
+    assert len(matched_ids) == 2

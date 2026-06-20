@@ -119,36 +119,53 @@ def normalize_transaction(row: dict, mapping: dict, account_id: str) -> dict:
     except Exception as e:
         raise ValueError(f"Failed to normalize row {row}: {str(e)}")
 
-def detect_transfers(transactions: list[dict]) -> list[tuple[str, str]]:
+def _dates_within(date1: str, date2: str, max_days: int) -> bool:
+    try:
+        d1 = datetime.strptime(date1, "%Y-%m-%d")
+        d2 = datetime.strptime(date2, "%Y-%m-%d")
+    except ValueError:
+        return date1 == date2
+    return abs((d1 - d2).days) <= max_days
+
+
+def detect_transfers(transactions: List[dict], max_day_diff: int = 2) -> List[tuple]:
     """
-    Detect transfers between accounts.
-    Returns list of (transaction_id1, transaction_id2) pairs
+    Detect transfer pairs between DIFFERENT accounts: equal absolute amount,
+    opposite sign, dated within `max_day_diff` days of each other (banks often
+    post the two sides of a transfer a day apart). Each transaction is
+    matched to at most one counterpart.
+
+    transactions: list of dicts with "id", "account_id", "amount", "date" (YYYY-MM-DD)
+    Returns list of (transaction_id1, transaction_id2) pairs.
     """
+    by_amount: dict = {}
+    for t in transactions:
+        by_amount.setdefault(abs(t.get("amount", 0)), []).append(t)
+
+    matched_ids = set()
     transfers = []
 
-    # Group by amount
-    by_amount = {}
-    for t in transactions:
-        amount = abs(t.get("amount", 0))
-        if amount not in by_amount:
-            by_amount[amount] = []
-        by_amount[amount].append(t)
-
-    # Look for opposite sign transactions with same amount
     for amount, group in by_amount.items():
-        if len(group) >= 2:
-            for i in range(len(group)):
-                for j in range(i + 1, len(group)):
-                    t1 = group[i]
-                    t2 = group[j]
+        if amount == 0 or len(group) < 2:
+            continue
+        for i in range(len(group)):
+            t1 = group[i]
+            if t1.get("id") in matched_ids:
+                continue
+            for j in range(i + 1, len(group)):
+                t2 = group[j]
+                if t2.get("id") in matched_ids:
+                    continue
+                if t1.get("account_id") == t2.get("account_id"):
+                    continue  # transfers are between different accounts by definition
+                if t1.get("amount", 0) * t2.get("amount", 0) >= 0:
+                    continue  # need opposite signs
+                if not _dates_within(t1.get("date", ""), t2.get("date", ""), max_day_diff):
+                    continue
 
-                    # Check opposite signs and similar dates
-                    if t1.get("amount", 0) * t2.get("amount", 0) < 0:  # Opposite signs
-                        date1 = t1.get("date", "")
-                        date2 = t2.get("date", "")
-
-                        # Same date or within 1 day
-                        if date1 == date2 or (date1[:7] == date2[:7]):  # Same month at minimum
-                            transfers.append((t1.get("id"), t2.get("id")))
+                transfers.append((t1.get("id"), t2.get("id")))
+                matched_ids.add(t1.get("id"))
+                matched_ids.add(t2.get("id"))
+                break  # t1 is matched; move on to the next candidate
 
     return transfers
