@@ -1,4 +1,4 @@
-Transaction Date,Amount,Description,Merchant,Currency
+date,amount,description,merchant,currency
 2024-01-05,150.00,Whole Foods Market,Grocery Store,USD
 2024-01-06,-1200.00,Monthly Rent Payment,Property Management,USD
 2024-01-08,3500.00,Salary Deposit,Employer Inc,USD

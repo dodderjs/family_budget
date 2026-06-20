@@ -1,7 +1,5 @@
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
 from sqlalchemy.orm import Session
-import csv
-import io
 from datetime import datetime
 from app.db.database import get_db
 from app.models.schemas import (
@@ -9,8 +7,8 @@ from app.models.schemas import (
     AccountCreate, AccountResponse, AnalyticsSummary, TrainingDataCreate
 )
 from app.services.transaction_service import TransactionService
-from app.services.normalization import normalize_transaction
-from app.services.format_service import get_mapping_for_format, suggest_mapping
+from app.services.normalization import normalize_transaction, should_skip_row
+from app.services.format_service import get_mapping_for_format, suggest_mapping, read_csv_rows
 from app.models.transaction import Account, Transaction, TrainingData
 
 router = APIRouter(prefix="/api/v1", tags=["transactions"])
@@ -37,15 +35,13 @@ def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
     try:
         contents = file.file.read()
-        stream = io.StringIO(contents.decode('utf-8'))
-        reader = csv.DictReader(stream)
-        rows = list(reader)
-        
+        rows = read_csv_rows(contents)
+
         if not rows:
             raise HTTPException(status_code=400, detail="Empty CSV file")
-        
+
         # Suggest format mapping
-        suggestion = suggest_mapping(rows)
+        suggestion = suggest_mapping(list(rows[0].keys()))
         
         return {
             "status": "preview_ready",
@@ -76,9 +72,13 @@ def normalize_transactions(
     
     created = 0
     duplicates = 0
+    skipped = 0
     errors = []
-    
+
     for row in request.data:
+        if should_skip_row(row, mapping):
+            skipped += 1
+            continue
         try:
             normalized = normalize_transaction(row, mapping, request.account_id)
             transaction = TransactionService.create_transaction(db, normalized)
@@ -88,10 +88,11 @@ def normalize_transactions(
             duplicates += 1
         except Exception as e:
             errors.append(str(e))
-    
+
     return {
         "created": created,
         "duplicates": duplicates,
+        "skipped": skipped,
         "errors": errors,
         "status": "success"
     }

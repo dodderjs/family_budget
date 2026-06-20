@@ -34,12 +34,14 @@ class TransactionResponse(TransactionBase):
 class AccountCreate(BaseModel):
     name: str
     account_number: str
+    type: Optional[str] = None  # Credit, Debit, Saving, Prepaid, Curve, etc.
 
     class Config:
         json_schema_extra = {
             "example": {
                 "name": "My Checking Account",
-                "account_number": "****1234"
+                "account_number": "****1234",
+                "type": "Checking"
             }
         }
 
@@ -47,6 +49,7 @@ class AccountResponse(BaseModel):
     id: str
     name: str
     account_number: str
+    type: Optional[str] = None
     created_at: datetime
 
     class Config:

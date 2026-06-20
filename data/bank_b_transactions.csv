@@ -1,4 +1,4 @@
-Date,Debit/Credit,Transaction,Vendor
+date,amount,description,merchant
 01/05/2024,150.00,Grocery Purchase,Whole Foods
 01/06/2024,1200.00,Rent Payment,Landlord
 01/08/2024,-3500.00,Direct Deposit,Employer

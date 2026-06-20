@@ -72,26 +72,29 @@ file: <binary CSV file>
 {
   "status": "preview_ready",
   "row_count": 25,
-  "detected_format": "bank_a",
+  "detected_format": "revolut",
   "suggested_mapping": {
-    "dateField": "Transaction Date",
+    "dateField": "Started Date",
     "amountField": "Amount",
-    "descriptionField": "Description",
-    "merchantField": "Merchant",
+    "descriptionFields": ["Description"],
+    "merchantFields": ["Description"],
     "currencyField": "Currency"
   },
   "sample_row": {
-    "Transaction Date": "2024-01-05",
-    "Amount": "150.00",
-    "Description": "Whole Foods Market",
-    "Merchant": "Grocery Store",
-    "Currency": "USD"
+    "Type": "Card Payment",
+    "Started Date": "2024-12-31 10:10:20",
+    "Description": "Lidl",
+    "Amount": "-17224.00",
+    "Currency": "HUF",
+    "State": "COMPLETED"
   }
 }
 ```
 
 ### Normalize & Ingest Transactions
-Process CSV data and store in database with ML predictions.
+Process CSV data and store in database with ML predictions. `data` is the
+full set of parsed rows (not a preview slice) — the frontend sends every row
+from the uploaded file here.
 
 ```http
 POST /transactions/normalize
@@ -99,14 +102,15 @@ Content-Type: application/json
 
 {
   "account_id": "550e8400-e29b-41d4-a716-446655440000",
-  "bank_format": "bank_a",
+  "bank_format": "revolut",
   "data": [
     {
-      "Transaction Date": "2024-01-05",
-      "Amount": "150.00",
-      "Description": "Whole Foods Market",
-      "Merchant": "Grocery Store",
-      "Currency": "USD"
+      "Type": "Card Payment",
+      "Started Date": "2024-12-31 10:10:20",
+      "Description": "Lidl",
+      "Amount": "-17224.00",
+      "Currency": "HUF",
+      "State": "COMPLETED"
     }
   ]
 }
@@ -117,10 +121,13 @@ Content-Type: application/json
 {
   "created": 23,
   "duplicates": 2,
+  "skipped": 1,
   "errors": [],
   "status": "success"
 }
 ```
+`skipped` counts rows excluded by format-specific rules (e.g. Revolut
+`PENDING`/`REVERTED` transactions) rather than ingested or rejected.
 
 ---
 
@@ -428,26 +435,44 @@ Standard categories used in the system:
 
 ## Bank Format Detection
 
-The system supports two main bank formats and a generic one:
+The system auto-detects the CSV delimiter (`,` / `;` / tab) and bank format
+from the header row. Supported formats, derived from real exports in `example/`:
 
-### Bank A
+### Revolut (`revolut`)
+Comma-delimited. `PENDING`/`REVERTED` rows are skipped on import.
 ```
-Transaction Date | Amount | Description | Merchant | Currency
-```
-
-### Bank B
-```
-Date | Debit/Credit | Transaction | Vendor
+Type | Product | Started Date | Completed Date | Description | Amount | Fee | Currency | State | Balance
 ```
 
-### Generic
+### Curve (`curve`)
+Comma-delimited. Amounts are always reported positive in the file; the
+importer negates them (expense) unless `Type` is `REFUNDED`.
 ```
-date | amount | description
+Export Format | Date (YYYY-MM-DD as UTC) | Time (HH:MM:SS) | Merchant | Txn Amount (Funding Card) | Txn Currency (Funding Card) | ... | Type | Category | Notes
 ```
+
+### MBH Bank — debit and credit card exports (`mbh`)
+Semicolon-delimited, Hungarian headers/locale (`1 165,00` style amounts,
+`YYYY.MM.DD.` dates). The same mapping covers both the debit-account and
+credit-card export files; use the account's `type` field to distinguish them.
+```
+Számla | Megbízás típusa | Összeg | Devizanem | ... | Tranzakció dátuma | ... | Tranzakció helye | Könyvelési dátum
+```
+
+### K&H Bank — account history export (`kh`)
+Tab-delimited, Hungarian headers/locale. Amounts have no thousands separator
+or decimals (plain signed integers).
+```
+könyvelés dátuma | tranzakció azonosító | típus | könyvelési számla | ... | partner elnevezése | összeg | összeg devizaneme | közlemény | ...
+```
+
+### Generic (`generic`)
+Fallback for unrecognized headers; expects `date | amount | description` with
+plain ISO/US-style values. Used as the format whenever no known signature matches.
 
 Auto-detection happens in the `/upload` endpoint. Format can be manually specified in `/transactions/normalize`.
 
 ---
 
-Last Updated: May 2024
-Version: 1.0.0
+Last Updated: June 2026
+Version: 1.1.0

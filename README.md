@@ -118,9 +118,12 @@ family_budget/
 
 ## 🗄️ Sample Data
 
-Sample CSV files are provided in `/data`:
-- `bank_a_transactions.csv` - Format A
-- `bank_b_transactions.csv` - Format B
+Real-world bank/card exports for testing the importer against actual formats
+(Revolut, Curve, MBH Bank, K&H Bank) are in `/example`.
+
+`/data` also has two minimal CSVs (`bank_a_transactions.csv`,
+`bank_b_transactions.csv`) with plain `date,amount,description`-style columns
+that exercise the `generic` fallback format.
 
 ## 🐛 Debugging
 

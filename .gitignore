@@ -57,3 +57,6 @@ logs/
 
 # Docker
 .dockerignore
+
+# Example data
+example/

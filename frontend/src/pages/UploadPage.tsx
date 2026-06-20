@@ -6,8 +6,9 @@ import { useTransactionStore } from '../store/transactionStore';
 
 export const UploadPage: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
+  const [rows, setRows] = useState<any[] | null>(null);
   const [preview, setPreview] = useState<any[] | null>(null);
-  const [bankFormat, setBankFormat] = useState('bank_a');
+  const [bankFormat, setBankFormat] = useState('generic');
   const [suggestedMapping, setSuggestedMapping] = useState<any>(null);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [selectedAccount, setSelectedAccount] = useState<string>();
@@ -55,8 +56,9 @@ export const UploadPage: React.FC = () => {
     setLoading(true);
 
     try {
-      const rows = await csvService.parseFile(file);
-      setPreview(rows.slice(0, 5));
+      const parsedRows = await csvService.parseFile(file);
+      setRows(parsedRows);
+      setPreview(parsedRows.slice(0, 5));
 
       const response = await transactionService.uploadCSV(file);
       setSuggestedMapping(response.data.suggested_mapping);
@@ -71,20 +73,21 @@ export const UploadPage: React.FC = () => {
   };
 
   const handleProcessFile = async () => {
-    if (!file || !selectedAccount || !preview) return;
+    if (!file || !selectedAccount || !rows) return;
     setLoading(true);
 
     try {
       const response = await transactionService.normalizeTransactions(
         selectedAccount,
         bankFormat,
-        preview
+        rows
       );
-      setMessage({ 
-        type: 'success', 
-        text: `Created: ${response.data.created}, Duplicates: ${response.data.duplicates}` 
+      setMessage({
+        type: 'success',
+        text: `Created: ${response.data.created}, Duplicates: ${response.data.duplicates}, Skipped: ${response.data.skipped ?? 0}`
       });
       setFile(null);
+      setRows(null);
       setPreview(null);
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message });
