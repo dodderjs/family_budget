@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.database import engine, Base
+from app.db.database import engine, Base, wait_for_db
 from app.api.transactions import router as transaction_router
 
 # Create app first
@@ -24,7 +24,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create tables
+# Wait for the DB to actually accept connections, then create tables
+wait_for_db()
 Base.metadata.create_all(bind=engine)
 
 # Include routers AFTER middleware

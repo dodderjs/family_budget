@@ -60,3 +60,5 @@ logs/
 
 # Example data
 example/
+backend/app/ml/models/model.pkl
+backend/app/ml/models/vectorizer.pkl
