@@ -14,23 +14,116 @@ export interface Transaction {
   category_final: string | null;
   is_transfer: boolean;
   transfer_match_id: string | null;
+  transfer_match_account_id: string | null;
+  card_hint: string | null;
+  is_duplicate: boolean;
+  duplicate_of_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Card {
+  id: string;
+  account_id: string;
+  card_number: string;
+  created_at: string;
 }
 
 export interface Account {
   id: string;
   name: string;
   account_number: string;
+  type: string | null;
+  created_at: string;
+  cards: Card[];
+}
+
+export interface AnalyticsSummary {
+  total_transactions: number;
+  total_income: number;
+  total_expenses: number;
+  average_transaction: number;
+  categories_used: string[];
+  total_transferred: number;
+}
+
+export interface BreakdownEntry {
+  count: number;
+  total: number;
+}
+
+export type CategoryBreakdown = Record<string, BreakdownEntry>;
+
+export interface MonthlyTrendEntry {
+  income: number;
+  expenses: number;
+}
+
+export type MonthlyTrends = Record<string, MonthlyTrendEntry>;
+
+export type BreakdownGroupBy = 'category' | 'merchant' | 'account';
+
+/** A raw parsed CSV row - column names vary per bank format, so this stays a string map. */
+export type CsvRow = Record<string, string>;
+
+export interface NormalizeResult {
+  created: number;
+  duplicates: number;
+  skipped: number;
+  transfers_detected: number;
+  curve_duplicates_detected: number;
+  errors: string[];
+  status: string;
+  date_from: string | null;
+  date_to: string | null;
+}
+
+export type CoverageMonthStatus = 'covered' | 'gap' | 'missing' | 'dismissed';
+
+export interface CoverageMonthEntry {
+  month: string;
+  transaction_count: number;
+  status: CoverageMonthStatus;
+}
+
+export interface AccountCoverage {
+  account_id: string;
+  first_date: string | null;
+  last_date: string | null;
+  months: CoverageMonthEntry[];
+}
+
+/** A main (group) category has parent_id null; a leaf's parent_id points at
+ * a main. Only leaves are ever assigned to a transaction. */
+export interface CategoryNode {
+  id: string;
+  key: string;
+  label: string;
+  parent_id: string | null;
+  sign: 'positive' | 'negative' | null;
+  requires_transfer_account: boolean;
+  ml_index: number | null;
   created_at: string;
 }
 
 export const transactionService = {
-  createAccount: (name: string, account_number: string) => 
-    api.post('/accounts', { name, account_number }),
+  createAccount: (name: string, account_number: string, type?: string) =>
+    api.post<Account>('/accounts', { name, account_number, type }),
 
-  listAccounts: () => 
-    api.get('/accounts'),
+  listAccounts: () =>
+    api.get<Account[]>('/accounts'),
+
+  updateAccount: (id: string, updates: { name?: string; account_number?: string; type?: string | null }) =>
+    api.patch<Account>(`/accounts/${id}`, updates),
+
+  deleteAccount: (id: string, force = false) =>
+    api.delete<{ status: string; transactions_deleted: number }>(`/accounts/${id}`, { params: { force } }),
+
+  addCard: (account_id: string, card_number: string) =>
+    api.post<Card>(`/accounts/${account_id}/cards`, { card_number }),
+
+  removeCard: (account_id: string, card_id: string) =>
+    api.delete<{ status: string }>(`/accounts/${account_id}/cards/${card_id}`),
 
   uploadCSV: (file: File) => {
     const formData = new FormData();
@@ -40,27 +133,61 @@ export const transactionService = {
     });
   },
 
-  normalizeTransactions: (account_id: string, bank_format: string, data: any[]) =>
-    api.post('/transactions/normalize', { account_id, bank_format, data }),
+  normalizeTransactions: (account_id: string, bank_format: string, data: CsvRow[]) =>
+    api.post<NormalizeResult>('/transactions/normalize', { account_id, bank_format, data }),
 
   listTransactions: (account_id?: string, limit = 100, offset = 0) =>
-    api.get('/transactions', { params: { account_id, limit, offset } }),
+    api.get<Transaction[]>('/transactions', { params: { account_id, limit, offset } }),
 
-  getReviewTransactions: (limit = 50) =>
-    api.get('/transactions/review', { params: { limit } }),
+  getTransaction: (id: string) =>
+    api.get<Transaction>(`/transactions/${id}`),
+
+  getReviewTransactions: (
+    limit = 50,
+    account_id?: string | null,
+    date_from?: string | null,
+    date_to?: string | null,
+    include_finalized = false
+  ) =>
+    api.get<Transaction[]>('/transactions/review', {
+      params: { limit, account_id, date_from, date_to, include_finalized },
+    }),
 
   updateTransaction: (id: string, category_final?: string, merchant?: string) =>
-    api.patch(`/transactions/${id}`, { category_final, merchant }),
+    api.patch<Transaction>(`/transactions/${id}`, { category_final, merchant }),
 
-  getAnalyticsSummary: (account_id?: string) =>
-    api.get('/analytics/summary', { params: { account_id } }),
+  setTransferPair: (id: string, account_id: string | null) =>
+    api.patch<Transaction>(`/transactions/${id}/transfer`, { account_id }),
 
-  getCategoryBreakdown: (account_id?: string) =>
-    api.get('/analytics/breakdown', { params: { account_id } }),
+  getAnalyticsSummary: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
+    api.get<AnalyticsSummary>('/analytics/summary', { params: { account_id, date_from, date_to } }),
 
-  getMonthlyTrends: (account_id?: string) =>
-    api.get('/analytics/trends', { params: { account_id } }),
+  getCategoryBreakdown: (
+    account_id?: string | null,
+    date_from?: string | null,
+    date_to?: string | null,
+    group_by: BreakdownGroupBy = 'category'
+  ) =>
+    api.get<CategoryBreakdown>('/analytics/breakdown', { params: { account_id, date_from, date_to, group_by } }),
+
+  getMonthlyTrends: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
+    api.get<MonthlyTrends>('/analytics/trends', { params: { account_id, date_from, date_to } }),
 
   retrainModel: () =>
     api.post('/ml/retrain'),
+
+  getAccountCoverage: (accountId: string) =>
+    api.get<AccountCoverage>(`/accounts/${accountId}/coverage`),
+
+  setCoverageMonthStatus: (accountId: string, month: string, status: 'missing' | 'dismissed' | 'gap') =>
+    api.put<{ status: string }>(`/accounts/${accountId}/coverage/${month}`, { status }),
+
+  listCategories: () =>
+    api.get<CategoryNode[]>('/categories'),
+
+  createMainCategory: (label: string) =>
+    api.post<CategoryNode>('/categories', { label }),
+
+  createLeafCategory: (label: string, parentId: string) =>
+    api.post<CategoryNode>('/categories', { label, parent_id: parentId }),
 };
