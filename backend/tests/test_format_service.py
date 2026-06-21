@@ -73,3 +73,19 @@ def test_read_csv_rows_handles_bom_and_semicolons():
     assert len(rows) == 1
     assert rows[0]["Számla"] == "111"
     assert detect_bank_format(list(rows[0].keys())) == "mbh"
+
+
+def test_mbh_and_kh_expose_an_account_number_field_for_account_auto_detection():
+    assert get_mapping_for_format("mbh")["accountNumberField"] == "Számla"
+    assert get_mapping_for_format("kh")["accountNumberField"] == "könyvelési számla"
+
+
+def test_formats_with_no_account_identifier_in_the_export_are_explicit_about_it():
+    # Revolut's export has no account-number-like column at all.
+    assert get_mapping_for_format("revolut")["accountNumberField"] is None
+    assert get_mapping_for_format("generic")["accountNumberField"] is None
+
+
+def test_every_format_has_a_display_name_for_the_add_account_dialog():
+    for name in ("revolut", "curve", "mbh", "kh", "generic"):
+        assert get_mapping_for_format(name)["displayName"]

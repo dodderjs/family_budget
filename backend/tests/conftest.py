@@ -4,6 +4,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.database import Base
 from app.models.transaction import Account  # noqa: F401 - ensures models are registered on Base
+from app.services.category_service import CategoryService
 
 
 @pytest.fixture
@@ -12,6 +13,9 @@ def db_session():
     Base.metadata.create_all(bind=engine)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionLocal()
+    # Every test gets the full default category hierarchy for free - mirrors
+    # how the account/second_account fixtures provide baseline test data.
+    CategoryService.seed_defaults(session)
     try:
         yield session
     finally:
