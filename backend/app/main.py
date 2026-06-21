@@ -1,7 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.database import engine, Base, wait_for_db
+from app.db.database import engine, Base, SessionLocal, wait_for_db
 from app.api.transactions import router as transaction_router
+from app.services.category_service import CategoryService
 
 # Create app first
 app = FastAPI(
@@ -27,6 +28,14 @@ app.add_middleware(
 # Wait for the DB to actually accept connections, then create tables
 wait_for_db()
 Base.metadata.create_all(bind=engine)
+
+# Seed the default category hierarchy once at startup - idempotent, so this
+# is a no-op on every restart after the first.
+_startup_db = SessionLocal()
+try:
+    CategoryService.seed_defaults(_startup_db)
+finally:
+    _startup_db.close()
 
 # Include routers AFTER middleware
 app.include_router(transaction_router)

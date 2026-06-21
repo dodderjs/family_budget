@@ -27,6 +27,6 @@ def reset_all_transaction_data(db: Session, reset_training: bool = True) -> dict
     db.commit()
 
     if reset_training:
-        predictor.reset_to_baseline()
+        predictor.reset_to_baseline(db)
 
     return {"transactions_deleted": transactions_deleted, "training_data_deleted": training_deleted}

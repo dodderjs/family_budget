@@ -7,64 +7,11 @@ from sklearn.linear_model import LogisticRegression
 import numpy as np
 from pathlib import Path
 from typing import Optional
+from sqlalchemy.orm import Session
+from app.services.category_service import CategoryService
 
 MODEL_DIR = Path(__file__).parent.parent / "ml" / "models"
 MODEL_DIR.mkdir(exist_ok=True)
-
-CATEGORIES = [
-    "groceries",
-    "rent",
-    "salary",
-    "bills",
-    "transport",
-    "entertainment",
-    "other",
-    # Appended rather than inserted alphabetically - CATEGORY_TO_INDEX below
-    # is positional, and a persisted model.pkl from before these existed
-    # still expects "other" at index 6. New categories must always go after
-    # the existing ones, never reordered.
-    "shopping",
-    "eating_out",
-    "travel",
-    "health",
-    # Transfer-type categories - money moving between the user's own
-    # accounts rather than being spent. Each requires a transfer pairing
-    # (Transaction.transfer_match_id) to be finalized as this category - see
-    # TRANSFER_CATEGORIES/update_transaction_category in transaction_service.py.
-    "topup",
-    "credit_payback",
-    "saving",
-    "transfer",
-]
-# Fixed category->index mapping, shared by every fit() and predict() call, so
-# the integer label a model is trained on always means the same category.
-CATEGORY_TO_INDEX = {category: index for index, category in enumerate(CATEGORIES)}
-
-# Trivial rule layer on top of the ML model: a category tied to one
-# transaction direction can never be predicted for the other direction (e.g.
-# "salary" is income-only, so a negative/expense amount should never be
-# classified as salary, no matter what the model's raw probabilities say).
-# None means unconstrained (works for either sign).
-CATEGORY_SIGN = {
-    "groceries": "negative",
-    "rent": "negative",
-    "salary": "positive",
-    "utilities": "negative",
-    "transport": "negative",
-    "entertainment": "negative",
-    "other": None,
-    "shopping": "negative",
-    "eating_out": "negative",
-    "travel": "negative",
-    "health": "negative",
-    # Each transfer category can land on either leg of the pair (e.g.
-    # "topup" is an outflow on the source account, an inflow on the prepaid
-    # card) - unconstrained, like "other".
-    "topup": None,
-    "credit_payback": None,
-    "saving": None,
-    "transfer": None,
-}
 
 
 # High-precision deterministic overrides, checked before the ML model -
@@ -96,16 +43,23 @@ def _match_known_merchant(text: str) -> Optional[str]:
     return None
 
 
-def _label_to_index(label: str) -> int:
-    return CATEGORY_TO_INDEX.get(label, CATEGORY_TO_INDEX["other"])
+def _label_to_index(db: Session, label: str) -> int:
+    index_map = CategoryService.get_ml_index_map(db)
+    return index_map.get(label, index_map.get("other", 0))
+
+
+def _index_to_label(db: Session, index: int) -> str:
+    index_map = CategoryService.get_ml_index_map(db)
+    reverse = {v: k for k, v in index_map.items()}
+    return reverse.get(index, "other")
 
 
 def _is_credit_account(account_type: str = None) -> bool:
     return bool(account_type) and "credit" in account_type.lower()
 
 
-def _category_allowed(category: str, amount: float, account_type: str = None) -> bool:
-    sign = CATEGORY_SIGN.get(category)
+def _category_allowed(db: Session, category: str, amount: float, account_type: str = None) -> bool:
+    sign = CategoryService.get_sign(db, category)
     if sign == "positive":
         if amount <= 0:
             return False
@@ -147,6 +101,8 @@ SEED_DATA = [
     ("Landlord Payment", "rent", -150000.0),
     ("Lakber", "rent", -150000.0),
     ("Berleti dij", "rent", -150000.0),
+    ("Lakber Fizetes", "rent", -150000.0),
+    ("Alberlet Dij", "rent", -150000.0),
     ("Salary Deposit", "salary", 350000.0),
     ("Paycheck", "salary", 350000.0),
     ("Income Deposit", "salary", 350000.0),
@@ -218,6 +174,27 @@ SEED_DATA = [
     ("Bank Transfer", "transfer", -50000.0),
     ("Internal Transfer", "transfer", -50000.0),
     ("Atutalas Bankon Belul", "transfer", -50000.0),
+    ("Consulting Fee", "business_services", -25000.0),
+    ("Business Service", "business_services", -25000.0),
+    ("Accounting Fee", "business_services", -25000.0),
+    ("Miscellaneous Expense", "general", -3000.0),
+    ("General Purchase", "general", -3000.0),
+    ("Bank Statement Fee", "general_finance", -2000.0),
+    ("Financial Service Charge", "general_finance", -2000.0),
+    # MBH/K&H's "Megbízás típusa"/"típus" transaction-type text is the
+    # category signal itself for these rows (see MBH_CATEGORY_MAP/
+    # KH_CATEGORY_MAP in format_service.py) - real raw values used as seed
+    # phrases so the model recognizes them even on formats without that
+    # deterministic mapping.
+    ("Forgalmi jutalek", "bank_fees", -500.0),
+    ("Eves kartyadij", "bank_fees", -3000.0),
+    ("Szamlavezetes havi koltsege", "bank_fees", -1000.0),
+    ("Kamat", "interest", 50.0),
+    ("Hitel toke alapkamata", "loan_interest", -20000.0),
+    ("Toketorlesztes", "loan_principal", -80000.0),
+    ("Hitel torlesztes", "loan_principal", -80000.0),
+    ("Atm felvet", "cash_withdrawal", -20000.0),
+    ("Keszpenzfelvet K&H atmbol", "cash_withdrawal", -20000.0),
 ]
 
 
@@ -255,23 +232,25 @@ class CategoryPredictor:
         self.load_model()
 
     def load_model(self):
-        """Load model from disk or create new one"""
+        """Load a persisted model from disk if one exists. If not, leaves
+        self.model/vectorizer unset - building the baseline needs a db
+        session (category metadata now lives there), which isn't available
+        at construction time (the global `predictor` below is built at
+        import time). predict()/retrain() lazily build it on first real use
+        instead, once they have a db session to pass in."""
         vectorizer_path = MODEL_DIR / "vectorizer.pkl"
         model_path = MODEL_DIR / "model.pkl"
 
         if vectorizer_path.exists() and model_path.exists():
             self.vectorizer = joblib.load(vectorizer_path)
             self.model = joblib.load(model_path)
-        else:
-            # Create baseline model
-            self._create_baseline()
 
-    def _create_baseline(self):
+    def _create_baseline(self, db: Session):
         """Create baseline model with seed data"""
         texts = [desc for desc, _, _ in SEED_DATA]
         labels = [cat for _, cat, _ in SEED_DATA]
         amounts = [amt for _, _, amt in SEED_DATA]
-        self._fit(texts, labels, amounts)
+        self._fit(db, texts, labels, amounts)
 
     def _build_features(self, texts: list[str], amounts: list[float]):
         """Combine TF-IDF text features with a single scaled amount-magnitude
@@ -285,12 +264,12 @@ class CategoryPredictor:
         amount_features = csr_matrix([[_amount_feature(a)] for a in amounts])
         return hstack([text_features, amount_features]).tocsr()
 
-    def _fit(self, texts: list[str], labels: list[str], amounts: list[float] = None) -> bool:
+    def _fit(self, db: Session, texts: list[str], labels: list[str], amounts: list[float] = None) -> bool:
         """Fit the vectorizer+model on (text, label, amount) data and persist
         it. Returns False without touching the existing model if there are
         fewer than 2 distinct labels, since LogisticRegression can't fit on a
         single class."""
-        if len({_label_to_index(label) for label in labels}) < 2:
+        if len({_label_to_index(db, label) for label in labels}) < 2:
             return False
         if amounts is None:
             amounts = [None] * len(texts)
@@ -301,7 +280,7 @@ class CategoryPredictor:
         X = hstack([text_features, amount_features]).tocsr()
 
         model = LogisticRegression(multi_class='multinomial', max_iter=1000)
-        y = np.array([_label_to_index(label) for label in labels])
+        y = np.array([_label_to_index(db, label) for label in labels])
         model.fit(X, y)
 
         self.vectorizer = vectorizer
@@ -309,24 +288,24 @@ class CategoryPredictor:
         self.save_model()
         return True
 
-    def predict(self, description: str, amount: float = None, account_type: str = None) -> tuple[str, float]:
+    def predict(self, db: Session, description: str, amount: float = None, account_type: str = None) -> tuple[str, float]:
         """Predict category and confidence for a transaction description.
-        If `amount` is given, only considers categories whose CATEGORY_SIGN
-        rule matches its direction (see module docstring above) - the
-        model's raw ranking is otherwise unconstrained. `account_type` adds a
-        further veto: a positive amount on a credit account is a balance
-        payback, not income, regardless of what CATEGORY_SIGN alone allows.
+        If `amount` is given, only considers categories whose sign (see
+        Category.sign) matches its direction - the model's raw ranking is
+        otherwise unconstrained. `account_type` adds a further veto: a
+        positive amount on a credit account is a balance payback, not
+        income, regardless of what sign alone allows.
 
         A known-merchant match (see KNOWN_MERCHANT_CATEGORIES) is checked
         first and, if allowed for this amount/account, returned immediately
         at full confidence - no point asking a small text model to guess at
         something already unambiguous."""
         known = _match_known_merchant(description)
-        if known and (amount is None or _category_allowed(known, amount, account_type)):
+        if known and (amount is None or _category_allowed(db, known, amount, account_type)):
             return known, 1.0
 
         if not self.model or not self.vectorizer:
-            self.load_model()
+            self._create_baseline(db)
 
         try:
             X = self._build_features([description], [amount])
@@ -341,8 +320,8 @@ class CategoryPredictor:
                 # no gaps, which isn't guaranteed (e.g. "other" is never a
                 # seed label).
                 class_value = self.model.classes_[idx]
-                category = CATEGORIES[class_value] if class_value < len(CATEGORIES) else "other"
-                if amount is None or _category_allowed(category, amount, account_type):
+                category = _index_to_label(db, class_value)
+                if amount is None or _category_allowed(db, category, amount, account_type):
                     return category, float(probabilities[idx])
 
             return "other", 0.0
@@ -355,7 +334,7 @@ class CategoryPredictor:
             joblib.dump(self.vectorizer, MODEL_DIR / "vectorizer.pkl")
             joblib.dump(self.model, MODEL_DIR / "model.pkl")
 
-    def reset_to_baseline(self):
+    def reset_to_baseline(self, db: Session):
         """Discard any learned corrections and retrain on just the seed data."""
         vectorizer_path = MODEL_DIR / "vectorizer.pkl"
         model_path = MODEL_DIR / "model.pkl"
@@ -363,9 +342,9 @@ class CategoryPredictor:
             vectorizer_path.unlink()
         if model_path.exists():
             model_path.unlink()
-        self._create_baseline()
+        self._create_baseline(db)
 
-    def retrain(self, training_data: list[tuple[str, str, float]]):
+    def retrain(self, db: Session, training_data: list[tuple[str, str, float]]):
         """
         Retrain on the seed baseline plus all accumulated user corrections.
         The baseline is always included so retraining never drops a category
@@ -382,7 +361,7 @@ class CategoryPredictor:
         texts = [desc for desc, _, _ in combined]
         labels = [cat for _, cat, _ in combined]
         amounts = [amt for _, _, amt in combined]
-        self._fit(texts, labels, amounts)
+        self._fit(db, texts, labels, amounts)
 
 # Global instance
 predictor = CategoryPredictor()

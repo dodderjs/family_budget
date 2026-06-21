@@ -5,7 +5,8 @@ from app.db.database import get_db
 from app.models.schemas import (
     UploadRequest, TransactionResponse, TransactionUpdate, TransferPairUpdate,
     AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
-    CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate
+    CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate,
+    CategoryCreate, CategoryResponse
 )
 from app.services.transaction_service import (
     TransactionService, DuplicateTransactionError, TransactionNotFoundError, NoMatchingTransferError,
@@ -16,6 +17,7 @@ from app.services.account_service import (
     CardNotFoundError, CardAlreadyExistsError
 )
 from app.services.coverage_service import CoverageService
+from app.services.category_service import CategoryService, CategoryNotFoundError, ParentMustBeMainCategoryError
 from app.services.normalization import normalize_transaction, should_skip_row
 from app.services.format_service import get_mapping_for_format, suggest_mapping, read_csv_rows
 from app.models.transaction import Account, Transaction, TrainingData
@@ -103,6 +105,24 @@ def remove_card(account_id: str, card_id: str, db: Session = Depends(get_db)):
     except CardNotFoundError:
         raise HTTPException(status_code=404, detail="Card not found")
     return {"status": "deleted"}
+
+@router.get("/categories", response_model=list[CategoryResponse])
+def list_categories(db: Session = Depends(get_db)):
+    """List every category - mains (parent_id null) and leaves together."""
+    return CategoryService.list_categories(db)
+
+@router.post("/categories", response_model=CategoryResponse)
+def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
+    """Create a main category (parent_id omitted) or a leaf under an
+    existing main (parent_id set)."""
+    try:
+        if category.parent_id is None:
+            return CategoryService.create_main_category(db, category.label)
+        return CategoryService.create_leaf_category(db, category.label, category.parent_id)
+    except CategoryNotFoundError:
+        raise HTTPException(status_code=404, detail="Parent category not found")
+    except ParentMustBeMainCategoryError:
+        raise HTTPException(status_code=400, detail="parent_id must be a main category, not a leaf")
 
 @router.post("/upload")
 def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -321,6 +341,6 @@ def retrain_model(db: Session = Depends(get_db)):
             data.append((description, td.corrected_label, amount))
 
     if data:
-        predictor.retrain(data)
+        predictor.retrain(db, data)
     
     return {"status": "retrained", "samples": len(data)}

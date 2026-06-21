@@ -97,10 +97,35 @@ class AccountCoverageFlag(Base):
     __table_args__ = (UniqueConstraint("account_id", "month", name="uq_coverage_flag_account_month"),)
 
 class Category(Base):
+    """Two-level category hierarchy: a main (group) category has parent_id
+    None; a leaf category's parent_id points at a main. Only leaves are ever
+    assigned to a transaction (category_predicted/category_final) - mains
+    exist purely for grouping/picker UX. key is the ascii snake_case
+    identifier used everywhere in code (ML training labels, category_hint
+    mapping, transfer-requirement checks); label is what the user actually
+    typed when creating it."""
     __tablename__ = "categories"
-    
+
+    # key is unique only *within* its own level (enforced in CategoryService,
+    # not via a DB constraint) - a main and a leaf are allowed to share a key
+    # (e.g. main "groceries" + leaf "groceries") since mains are never looked
+    # up by key anywhere; only leaf keys are ever assigned to a transaction.
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    name = Column(String(50), unique=True, nullable=False)
+    key = Column(String(100), nullable=False)
+    label = Column(String(100), nullable=False)
+    parent_id = Column(String(36), ForeignKey("categories.id"), nullable=True)
+    # Leaves only - mirrors the old hardcoded CATEGORY_SIGN: which amount
+    # direction this category is valid for. None means unconstrained.
+    sign = Column(String(10), nullable=True)
+    # Leaves only - True iff this leaf's parent main is "Transfers". Derived
+    # automatically at creation time (see CategoryService.create_leaf_category),
+    # not user-set, so it can't go stale if the main is later renamed.
+    requires_transfer_account = Column(Boolean, default=False)
+    # Leaves only - the integer label a model is trained on. Assigned once,
+    # permanently, when the leaf is created (never reused even if a leaf is
+    # later deleted) since it's baked into the persisted model.pkl - see
+    # ml_service.py's module docstring for why this can never be reordered.
+    ml_index = Column(Integer, unique=True, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class TrainingData(Base):

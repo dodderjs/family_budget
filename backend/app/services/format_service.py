@@ -2,15 +2,21 @@ import csv
 import io
 from typing import Dict, List, Optional
 
-# Curve tags every transaction with its own category in the export. Mapped to
-# our internal category set so it can be used as a trusted default instead of
-# an ML guess (see normalize_transaction's categoryField/categoryMap usage).
+# Curve tags every transaction with its own category in the export. Keys are
+# Curve's actual raw category text, lowercased (matches _map_category's
+# raw_category.strip().lower() lookup) - e.g. real exports say "Eating Out",
+# which lowercases to "eating out" with a space, not "eating_out". Values are
+# our internal leaf category keys, used as a trusted default instead of an ML
+# guess (see normalize_transaction's categoryField/categoryMap usage). Curve
+# doesn't sub-categorize fees/interest/loans itself, so its blunt "Finance"
+# tag maps to the generic "general_finance" leaf rather than one of the more
+# specific finance leaves MBH/K&H's transaction-type columns can identify.
 CURVE_CATEGORY_MAP = {
     "bills": "bills",
-    "business services": "business services",
-    "eating_out": "eating_out",
+    "business services": "business_services",
+    "eating out": "eating_out",
     "entertainment": "entertainment",
-    "finance": "finance",
+    "finance": "general_finance",
     "general": "general",
     "groceries": "groceries",
     "health": "health",
@@ -26,34 +32,34 @@ CURVE_CATEGORY_MAP = {
 # "Fogadott tétel" etc are genuinely ambiguous (any merchant/counterparty) and
 # are deliberately left out so the ML model decides from merchant text instead.
 MBH_CATEGORY_MAP = {
-    "hitel (tőke) alapkamata": "loan interest",
-    "éves kártyadíj": "bank fees",
-    "tőketörlesztés": "loan principal",
-    "forgalmi jutalék": "bank fees",
-    "számlavezetés havi költsége": "bank fees",
+    "hitel (tőke) alapkamata": "loan_interest",
+    "éves kártyadíj": "bank_fees",
+    "tőketörlesztés": "loan_principal",
+    "forgalmi jutalék": "bank_fees",
+    "számlavezetés havi költsége": "bank_fees",
     "kamat": "interest",
-    "kártya tranzakció díja": "bank fees",
-    "atm felvét": "cash withdrawal",
+    "kártya tranzakció díja": "bank_fees",
+    "atm felvét": "cash_withdrawal",
 }
 
 # Same idea for K&H's "típus" column - only fee/interest/loan-administrative
 # types, which have no real merchant either way.
 KH_CATEGORY_MAP = {
-    "tranzakciós költség": "bank fees",
-    "tranzakciós költség - készpénz": "bank fees",
-    "csomagdíj": "bank fees",
-    "csomagdíj visszatérítés": "bank fees",
+    "tranzakciós költség": "bank_fees",
+    "tranzakciós költség - készpénz": "bank_fees",
+    "csomagdíj": "bank_fees",
+    "csomagdíj visszatérítés": "bank_fees",
     "kamat": "interest",
-    "mobilinfo üzenetdíj": "bank fees",
-    "prémium számlavezetési díj": "bank fees",
-    "hitel törlesztés": "loan principal",
-    "hitelkamat törlesztés": "loan interest",
-    "törlesztési biztosítási díj": "bank fees",
-    "végtörlesztési díj": "bank fees",
+    "mobilinfo üzenetdíj": "bank_fees",
+    "prémium számlavezetési díj": "bank_fees",
+    "hitel törlesztés": "loan_principal",
+    "hitelkamat törlesztés": "loan_interest",
+    "törlesztési biztosítási díj": "bank_fees",
+    "végtörlesztési díj": "bank_fees",
     "konverziós átvezetés": "transfer",
-    "készpénzfelvét k&h atm-ből": "cash withdrawal",
-    "készpénzfelvét belföldi atm-ből": "cash withdrawal",
-    "kp. felvét tranzakciós jutalék": "bank fees",
+    "készpénzfelvét k&h atm-ből": "cash_withdrawal",
+    "készpénzfelvét belföldi atm-ből": "cash_withdrawal",
+    "kp. felvét tranzakciós jutalék": "bank_fees",
 }
 
 # Real bank/card export formats, derived from samples in example/.

@@ -4,6 +4,7 @@ from app.models.schemas import TransactionCreate, TransactionResponse
 from app.services.account_service import AccountNotFoundError
 from app.services.currency_service import CurrencyService, HUF
 from app.services.ml_service import predictor
+from app.services.category_service import CategoryService
 from app.services.normalization import detect_transfers, detect_curve_duplicates, _dates_within
 from datetime import datetime
 import json
@@ -20,13 +21,6 @@ class TransactionNotFoundError(Exception):
 class NoMatchingTransferError(Exception):
     """Raised when no transaction in the chosen account is a plausible
     transfer match (opposite sign, ~equal magnitude, within the day window)."""
-
-
-# Categories that describe money moving between the user's own accounts
-# rather than being spent - each must be paired with a transfer account
-# (Transaction.transfer_match_id) before it can be finalized, since the
-# point of these categories is to say *which* account the money moved to.
-TRANSFER_CATEGORIES = {"topup", "credit_payback", "saving", "transfer"}
 
 
 class TransferAccountRequiredError(Exception):
@@ -72,7 +66,7 @@ class TransactionService:
         # account_type additionally rules out income categories for a
         # positive amount on a credit account - that's a balance payback)
         category, confidence = predictor.predict(
-            transaction_data["description"], amount, transaction_data.get("account_type")
+            db, transaction_data["description"], amount, transaction_data.get("account_type")
         )
 
         # Some bank exports (e.g. Curve) already tag a category. Treat it as
@@ -254,7 +248,7 @@ class TransactionService:
         if not transaction:
             raise ValueError(f"Transaction {transaction_id} not found")
 
-        if category in TRANSFER_CATEGORIES and not transaction.transfer_match_id:
+        if CategoryService.requires_transfer_account(db, category) and not transaction.transfer_match_id:
             raise TransferAccountRequiredError(category)
 
         # Record training data

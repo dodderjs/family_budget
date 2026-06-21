@@ -124,3 +124,22 @@ class AccountCoverageResponse(BaseModel):
 
 class CoverageFlagUpdate(BaseModel):
     status: str  # missing | dismissed | gap
+
+class CategoryCreate(BaseModel):
+    label: str
+    # None creates a main (group) category; set, creates a leaf under that
+    # main - see CategoryService.create_leaf_category for validation.
+    parent_id: Optional[str] = None
+
+class CategoryResponse(BaseModel):
+    id: str
+    key: str
+    label: str
+    parent_id: Optional[str] = None
+    sign: Optional[str] = None
+    requires_transfer_account: bool = False
+    ml_index: Optional[int] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
