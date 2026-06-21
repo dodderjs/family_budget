@@ -58,7 +58,7 @@ A **complete, production-ready full-stack financial application** with:
 | **OPTIMIZATION.md** (NEW) | Performance improvements | Performance devs |
 | **QUICK_REFERENCE.md** (NEW) | Essential commands | All developers |
 | **CHECKLIST.md** | Production readiness items | QA/DevOps |
-| **copilot-instructions.md** | AI agent guidance | Claude/Copilot |
+| **CLAUDE.md** / **.github/copilot-instructions.md** | AI agent guidance | Claude/Copilot |
 
 **Total Documentation**: 12 markdown files, 50+ KB of comprehensive guides
 
@@ -266,7 +266,8 @@ family_budget/
 │   ├── OPTIMIZATION.md                # NEW: Performance guide
 │   ├── QUICK_REFERENCE.md             # NEW: Commands & workflows
 │   ├── CHECKLIST.md                   # Production checklist
-│   ├── copilot-instructions.md        # AI agent guidance
+│   ├── CLAUDE.md                      # AI agent guidance (Claude)
+│   ├── .github/copilot-instructions.md # AI agent guidance (Copilot)
 │   └── data/SCHEMA.md                 # Database schema
 │
 ├── Backend (13 Python files)
