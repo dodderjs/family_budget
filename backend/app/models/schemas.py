@@ -5,7 +5,7 @@ from datetime import datetime
 class TransactionBase(BaseModel):
     date: str
     amount: float
-    currency: str = "USD"
+    currency: str = "HUF"
     description: str
     merchant: Optional[str] = None
     account_id: str
@@ -17,6 +17,11 @@ class TransactionUpdate(BaseModel):
     category_final: Optional[str] = None
     merchant: Optional[str] = None
 
+class TransferPairUpdate(BaseModel):
+    # The account the transaction should be paired with as a transfer; null
+    # clears any existing pairing (the transaction isn't a transfer).
+    account_id: Optional[str] = None
+
 class TransactionResponse(TransactionBase):
     id: str
     hash_fingerprint: str
@@ -25,6 +30,16 @@ class TransactionResponse(TransactionBase):
     category_final: Optional[str]
     is_transfer: bool
     transfer_match_id: Optional[str]
+    # The account_id of the transaction on the other side of transfer_match_id
+    # - attached by TransactionService at query time (see
+    # _attach_transfer_pair_accounts) so the Review page can show/edit which
+    # account a transfer is paired with without an extra fetch per row.
+    transfer_match_account_id: Optional[str] = None
+    card_hint: Optional[str] = None
+    is_duplicate: bool = False
+    duplicate_of_id: Optional[str] = None
+    original_amount: Optional[float] = None
+    exchange_rate: Optional[float] = None
     created_at: datetime
     updated_at: datetime
 
@@ -45,12 +60,30 @@ class AccountCreate(BaseModel):
             }
         }
 
+class AccountUpdate(BaseModel):
+    name: Optional[str] = None
+    account_number: Optional[str] = None
+    type: Optional[str] = None
+
+class CardCreate(BaseModel):
+    card_number: str
+
+class CardResponse(BaseModel):
+    id: str
+    account_id: str
+    card_number: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class AccountResponse(BaseModel):
     id: str
     name: str
     account_number: str
     type: Optional[str] = None
     created_at: datetime
+    cards: list[CardResponse] = []
 
     class Config:
         from_attributes = True
@@ -71,8 +104,23 @@ class AnalyticsSummary(BaseModel):
     total_income: float
     total_expenses: float
     average_transaction: float
+    total_transferred: float = 0.0
     categories_used: list[str]
 
 class TrainingDataCreate(BaseModel):
     transaction_id: str
     corrected_label: str
+
+class CoverageMonthEntry(BaseModel):
+    month: str
+    transaction_count: int
+    status: str  # covered | gap | missing | dismissed
+
+class AccountCoverageResponse(BaseModel):
+    account_id: str
+    first_date: Optional[str] = None
+    last_date: Optional[str] = None
+    months: list[CoverageMonthEntry] = []
+
+class CoverageFlagUpdate(BaseModel):
+    status: str  # missing | dismissed | gap

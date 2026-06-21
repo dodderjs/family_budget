@@ -150,7 +150,7 @@ docker-compose exec mariadb mysql -u budget_user -p family_budget
 - `salary` - Income
 - `utilities` - Bills & services
 - `transport` - Gas, transit, rideshares
-- `entertainment` - Dining, events, movies
+- `entertainment` - eating_out, events, movies
 - `other` - Uncategorized
 
 ## 🔄 Upload Flow

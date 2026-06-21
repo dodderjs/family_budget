@@ -66,6 +66,12 @@ def _apply_sign(value: float, row: dict, mapping: dict) -> float:
     return value
 
 
+def _map_category(raw_category: Optional[str], category_map: Optional[dict]) -> Optional[str]:
+    if not raw_category or not category_map:
+        return None
+    return category_map.get(raw_category.strip().lower())
+
+
 def should_skip_row(row: dict, mapping: dict) -> bool:
     """True if this row represents a non-final state (e.g. a pending/reverted
     Revolut transaction) that shouldn't be ingested yet."""
@@ -100,11 +106,20 @@ def normalize_transaction(row: dict, mapping: dict, account_id: str) -> dict:
             description = "Unknown transaction"
 
         currency_field = mapping.get("currencyField")
-        currency = str(row.get(currency_field, "USD")).strip().upper() if currency_field else "USD"
+        currency = str(row.get(currency_field, "HUF")).strip().upper() if currency_field else "HUF"
         if not currency:
-            currency = "USD"
+            currency = "HUF"
 
         fingerprint = generate_fingerprint(date, amount, description, account_id)
+
+        category_field = mapping.get("categoryField")
+        category_hint = None
+        if category_field:
+            raw_category = _first_nonempty(row, [category_field])
+            category_hint = _map_category(raw_category, mapping.get("categoryMap"))
+
+        account_number_field = mapping.get("accountNumberField")
+        card_hint = _first_nonempty(row, [account_number_field]) if account_number_field else None
 
         return {
             "date": date,
@@ -114,7 +129,9 @@ def normalize_transaction(row: dict, mapping: dict, account_id: str) -> dict:
             "merchant": merchant,
             "hash_fingerprint": fingerprint,
             "account_id": account_id,
-            "raw_source": json.dumps(row)
+            "raw_source": json.dumps(row),
+            "category_hint": category_hint,
+            "card_hint": card_hint,
         }
     except Exception as e:
         raise ValueError(f"Failed to normalize row {row}: {str(e)}")
@@ -169,3 +186,75 @@ def detect_transfers(transactions: List[dict], max_day_diff: int = 2) -> List[tu
                 break  # t1 is matched; move on to the next candidate
 
     return transfers
+
+
+def _only_digits(value: str) -> str:
+    return "".join(c for c in value if c.isdigit())
+
+
+def _card_matches(registered_number: str, hint: str) -> bool:
+    """Tolerant card match: a hint (often just last-4, e.g. Curve's "Card
+    Last 4 Digits") matches a registered card if the registered number's
+    digits end with the hint's digits. Mirrors the frontend's
+    findMatchingAccount suffix-matching logic."""
+    registered_digits = _only_digits(registered_number)
+    hint_digits = _only_digits(hint)
+    if not hint_digits or len(hint_digits) < 4:
+        return False
+    return registered_digits.endswith(hint_digits)
+
+
+def detect_curve_duplicates(transactions: List[dict], cards: List[dict], max_day_diff: int = 2) -> List[tuple]:
+    """
+    Detect pairs of transactions that are the SAME real-world purchase
+    reported twice: once by a card-linking service (e.g. Curve), identified
+    by a per-row card_hint, and once by the underlying account the charge was
+    actually routed to. Unlike detect_transfers, this requires the SAME sign
+    (it's one expense on two statements, not money moving between accounts).
+
+    transactions: list of dicts with "id", "account_id", "amount", "date", "card_hint"
+    cards: list of dicts with "account_id", "card_number" - the registered
+        card history (see Card model) used to resolve a card_hint to an account
+    Returns list of (canonical_id, curve_id) tuples. Order matters: canonical_id
+    is the underlying-account leg (stays counted in analytics), curve_id is the
+    card-linking-service leg (excluded, enriches the canonical leg). This falls
+    out of the matching direction - only a transaction whose card_hint resolves
+    to a *different* account can initiate a match.
+    """
+    matched_ids = set()
+    duplicates = []
+
+    by_account_and_amount: dict = {}
+    for t in transactions:
+        key = (t.get("account_id"), round(abs(t.get("amount", 0)), 2))
+        by_account_and_amount.setdefault(key, []).append(t)
+
+    for t in transactions:
+        if t.get("id") in matched_ids or not t.get("card_hint"):
+            continue
+
+        candidate_account_ids = {
+            c["account_id"] for c in cards
+            if c.get("account_id") != t.get("account_id") and _card_matches(c.get("card_number", ""), t["card_hint"])
+        }
+        if not candidate_account_ids:
+            continue
+
+        for other_account_id in candidate_account_ids:
+            key = (other_account_id, round(abs(t.get("amount", 0)), 2))
+            for other in by_account_and_amount.get(key, []):
+                if other.get("id") in matched_ids or other.get("id") == t.get("id"):
+                    continue
+                if t.get("amount", 0) * other.get("amount", 0) < 0:
+                    continue  # same purchase restated, not a transfer - signs must match
+                if not _dates_within(t.get("date", ""), other.get("date", ""), max_day_diff):
+                    continue
+
+                duplicates.append((other.get("id"), t.get("id")))
+                matched_ids.add(t.get("id"))
+                matched_ids.add(other.get("id"))
+                break
+            if t.get("id") in matched_ids:
+                break
+
+    return duplicates

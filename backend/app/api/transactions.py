@@ -3,10 +3,19 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from app.db.database import get_db
 from app.models.schemas import (
-    UploadRequest, TransactionResponse, TransactionUpdate,
-    AccountCreate, AccountResponse, AnalyticsSummary, TrainingDataCreate
+    UploadRequest, TransactionResponse, TransactionUpdate, TransferPairUpdate,
+    AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
+    CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate
 )
-from app.services.transaction_service import TransactionService, DuplicateTransactionError
+from app.services.transaction_service import (
+    TransactionService, DuplicateTransactionError, TransactionNotFoundError, NoMatchingTransferError,
+    TransferAccountRequiredError
+)
+from app.services.account_service import (
+    AccountService, AccountNotFoundError, AccountHasTransactionsError,
+    CardNotFoundError, CardAlreadyExistsError
+)
+from app.services.coverage_service import CoverageService
 from app.services.normalization import normalize_transaction, should_skip_row
 from app.services.format_service import get_mapping_for_format, suggest_mapping, read_csv_rows
 from app.models.transaction import Account, Transaction, TrainingData
@@ -26,6 +35,74 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db)):
 def list_accounts(db: Session = Depends(get_db)):
     """List all accounts"""
     return db.query(Account).all()
+
+@router.patch("/accounts/{account_id}", response_model=AccountResponse)
+def update_account(account_id: str, update: AccountUpdate, db: Session = Depends(get_db)):
+    """Update an account's name, account number, or type"""
+    try:
+        return AccountService.update_account(
+            db, account_id, name=update.name, account_number=update.account_number, type=update.type
+        )
+    except AccountNotFoundError:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+@router.delete("/accounts/{account_id}")
+def delete_account(account_id: str, force: bool = False, db: Session = Depends(get_db)):
+    """Delete an account. If it has transactions, requires force=true since
+    that also deletes those transactions and any training data tied to them."""
+    try:
+        deleted = AccountService.delete_account(db, account_id, force=force)
+    except AccountNotFoundError:
+        raise HTTPException(status_code=404, detail="Account not found")
+    except AccountHasTransactionsError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Account has {e.transaction_count} transaction(s). Pass force=true to delete them too.",
+        )
+    return {"status": "deleted", "transactions_deleted": deleted}
+
+@router.get("/accounts/{account_id}/coverage", response_model=AccountCoverageResponse)
+def get_account_coverage(account_id: str, db: Session = Depends(get_db)):
+    """Per-month transaction coverage for an account, with detected gaps and
+    any user-confirmed missing/dismissed status."""
+    account = db.query(Account).filter(Account.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return CoverageService.get_account_coverage(db, account_id)
+
+@router.put("/accounts/{account_id}/coverage/{month}")
+def update_account_coverage_month(
+    account_id: str, month: str, update: CoverageFlagUpdate, db: Session = Depends(get_db)
+):
+    """Mark a month as missing/dismissed, or pass status=gap to reset it
+    back to an unreviewed detected gap."""
+    account = db.query(Account).filter(Account.id == account_id).first()
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    if update.status not in ("missing", "dismissed", "gap"):
+        raise HTTPException(status_code=400, detail="status must be one of: missing, dismissed, gap")
+    CoverageService.set_month_status(db, account_id, month, update.status)
+    return {"status": "ok"}
+
+@router.post("/accounts/{account_id}/cards", response_model=CardResponse)
+def add_card(account_id: str, card: CardCreate, db: Session = Depends(get_db)):
+    """Register a card to an account. Old cards aren't removed when a new
+    one is added - keep them on file so past transactions still resolve."""
+    try:
+        return AccountService.add_card(db, account_id, card.card_number)
+    except AccountNotFoundError:
+        raise HTTPException(status_code=404, detail="Account not found")
+    except CardAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+@router.delete("/accounts/{account_id}/cards/{card_id}")
+def remove_card(account_id: str, card_id: str, db: Session = Depends(get_db)):
+    """Remove a card from an account."""
+    try:
+        AccountService.remove_card(db, card_id)
+    except CardNotFoundError:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return {"status": "deleted"}
 
 @router.post("/upload")
 def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -74,6 +151,7 @@ def normalize_transactions(
     duplicates = 0
     skipped = 0
     errors = []
+    created_dates = []
 
     for row in request.data:
         if should_skip_row(row, mapping):
@@ -81,20 +159,26 @@ def normalize_transactions(
             continue
         try:
             normalized = normalize_transaction(row, mapping, request.account_id)
+            normalized["account_type"] = account.type
             TransactionService.create_transaction(db, normalized)
             created += 1
+            created_dates.append(normalized["date"])
         except DuplicateTransactionError:
             duplicates += 1
         except Exception as e:
             errors.append(str(e))
 
     transfers_detected = TransactionService.detect_and_flag_transfers(db) if created else 0
+    curve_duplicates_detected = TransactionService.detect_and_flag_curve_duplicates(db) if created else 0
 
     return {
         "created": created,
         "duplicates": duplicates,
         "skipped": skipped,
         "transfers_detected": transfers_detected,
+        "curve_duplicates_detected": curve_duplicates_detected,
+        "date_from": min(created_dates) if created_dates else None,
+        "date_to": max(created_dates) if created_dates else None,
         "errors": errors,
         "status": "success"
     }
@@ -112,10 +196,27 @@ def list_transactions(
 @router.get("/transactions/review", response_model=list[TransactionResponse])
 def get_review_transactions(
     limit: int = 50,
+    account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    include_finalized: bool = False,
     db: Session = Depends(get_db)
 ):
-    """Get transactions pending review (no final category)"""
-    return TransactionService.get_transactions_for_review(db, limit)
+    """Get transactions pending review (no final category by default; pass
+    include_finalized=true to also show already-confirmed ones)"""
+    return TransactionService.get_transactions_for_review(
+        db, limit, account_id, date_from, date_to, include_finalized
+    )
+
+@router.get("/transactions/{transaction_id}", response_model=TransactionResponse)
+def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
+    """Fetch a single transaction by id - used by the review page to drill
+    into a linked Curve/bank-account duplicate that isn't in the current
+    review queue page (e.g. it's already finalized)."""
+    transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not transaction:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    return transaction
 
 @router.patch("/transactions/{transaction_id}", response_model=TransactionResponse)
 def update_transaction(
@@ -127,12 +228,15 @@ def update_transaction(
     transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
     if not transaction:
         raise HTTPException(status_code=404, detail="Transaction not found")
-    
+
     if update.category_final:
-        transaction = TransactionService.update_transaction_category(
-            db, transaction_id, update.category_final
-        )
-    
+        try:
+            transaction = TransactionService.update_transaction_category(
+                db, transaction_id, update.category_final
+            )
+        except TransferAccountRequiredError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
     if update.merchant is not None:
         transaction.merchant = update.merchant
         transaction.updated_at = datetime.utcnow()
@@ -141,29 +245,54 @@ def update_transaction(
     
     return transaction
 
+@router.patch("/transactions/{transaction_id}/transfer", response_model=TransactionResponse)
+def update_transfer_pair(transaction_id: str, update: TransferPairUpdate, db: Session = Depends(get_db)):
+    """Manually set or clear which account a transaction is paired with as a
+    transfer - corrects detect_and_flag_transfers' greedy auto-matching when
+    it picks the wrong same-amount candidate, or clears a wrong auto-match
+    entirely (account_id=null)."""
+    try:
+        return TransactionService.set_transfer_pair(db, transaction_id, update.account_id)
+    except TransactionNotFoundError:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+    except AccountNotFoundError:
+        raise HTTPException(status_code=404, detail="Account not found")
+    except NoMatchingTransferError:
+        raise HTTPException(
+            status_code=400,
+            detail="No matching transaction found in that account (opposite sign, equal amount, within 2 days)",
+        )
+
 @router.get("/analytics/summary")
 def get_analytics_summary(
     account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
     db: Session = Depends(get_db)
 ):
     """Get analytics summary"""
-    return TransactionService.get_analytics_summary(db, account_id)
+    return TransactionService.get_analytics_summary(db, account_id, date_from, date_to)
 
 @router.get("/analytics/breakdown")
 def get_category_breakdown(
     account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    group_by: str = "category",
     db: Session = Depends(get_db)
 ):
-    """Get category breakdown"""
-    return TransactionService.get_category_breakdown(db, account_id)
+    """Get breakdown by category, merchant, or account"""
+    return TransactionService.get_category_breakdown(db, account_id, date_from, date_to, group_by)
 
 @router.get("/analytics/trends")
 def get_monthly_trends(
     account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
     db: Session = Depends(get_db)
 ):
     """Get monthly trends"""
-    return TransactionService.get_monthly_trends(db, account_id)
+    return TransactionService.get_monthly_trends(db, account_id, date_from, date_to)
 
 @router.post("/ml/retrain")
 def retrain_model(db: Session = Depends(get_db)):
@@ -173,16 +302,24 @@ def retrain_model(db: Session = Depends(get_db)):
     training_data = db.query(TrainingData).all()
     if not training_data:
         return {"status": "no_training_data"}
-    
-    # Extract description and corrected label
+
+    # description/amount are denormalized onto TrainingData at creation time
+    # so a correction still trains the model after its original transaction
+    # is gone (e.g. reset_data.py's transactions-only reset). Older rows from
+    # before that change fall back to the join.
     data = []
     for td in training_data:
-        transaction = db.query(Transaction).filter(
-            Transaction.id == td.transaction_id
-        ).first()
-        if transaction:
-            data.append((transaction.description, td.corrected_label))
-    
+        description = td.description
+        amount = td.amount
+        if not description and td.transaction_id:
+            transaction = db.query(Transaction).filter(
+                Transaction.id == td.transaction_id
+            ).first()
+            description = transaction.description if transaction else None
+            amount = transaction.amount if transaction else None
+        if description:
+            data.append((description, td.corrected_label, amount))
+
     if data:
         predictor.retrain(data)
     

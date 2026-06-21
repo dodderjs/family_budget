@@ -2,6 +2,60 @@ import csv
 import io
 from typing import Dict, List, Optional
 
+# Curve tags every transaction with its own category in the export. Mapped to
+# our internal category set so it can be used as a trusted default instead of
+# an ML guess (see normalize_transaction's categoryField/categoryMap usage).
+CURVE_CATEGORY_MAP = {
+    "bills": "bills",
+    "business services": "business services",
+    "eating_out": "eating_out",
+    "entertainment": "entertainment",
+    "finance": "finance",
+    "general": "general",
+    "groceries": "groceries",
+    "health": "health",
+    "shopping": "shopping",
+    "transport": "transport",
+    "travel": "travel",
+}
+
+# MBH's "Megbízás típusa" (transaction type) column is unambiguous for bank
+# fees / interest / loan-administrative rows - those rows don't have a real
+# merchant, so the type itself is the best (and only) category signal. Only
+# the types with one obvious category are mapped; "Vásárlás"/"Átutalás"/
+# "Fogadott tétel" etc are genuinely ambiguous (any merchant/counterparty) and
+# are deliberately left out so the ML model decides from merchant text instead.
+MBH_CATEGORY_MAP = {
+    "hitel (tőke) alapkamata": "loan interest",
+    "éves kártyadíj": "bank fees",
+    "tőketörlesztés": "loan principal",
+    "forgalmi jutalék": "bank fees",
+    "számlavezetés havi költsége": "bank fees",
+    "kamat": "interest",
+    "kártya tranzakció díja": "bank fees",
+    "atm felvét": "cash withdrawal",
+}
+
+# Same idea for K&H's "típus" column - only fee/interest/loan-administrative
+# types, which have no real merchant either way.
+KH_CATEGORY_MAP = {
+    "tranzakciós költség": "bank fees",
+    "tranzakciós költség - készpénz": "bank fees",
+    "csomagdíj": "bank fees",
+    "csomagdíj visszatérítés": "bank fees",
+    "kamat": "interest",
+    "mobilinfo üzenetdíj": "bank fees",
+    "prémium számlavezetési díj": "bank fees",
+    "hitel törlesztés": "loan principal",
+    "hitelkamat törlesztés": "loan interest",
+    "törlesztési biztosítási díj": "bank fees",
+    "végtörlesztési díj": "bank fees",
+    "konverziós átvezetés": "transfer",
+    "készpénzfelvét k&h atm-ből": "cash withdrawal",
+    "készpénzfelvét belföldi atm-ből": "cash withdrawal",
+    "kp. felvét tranzakciós jutalék": "bank fees",
+}
+
 # Real bank/card export formats, derived from samples in example/.
 # Each format's headerSignature is the minimal set of column names (after
 # whitespace/BOM stripping) that uniquely identifies it.
@@ -19,6 +73,8 @@ BANK_FORMATS = {
         "signRule": "as_is",
         "stateField": "State",
         "skipStates": {"PENDING", "REVERTED"},
+        "accountNumberField": None,  # not present in Revolut's export
+        "displayName": "Revolut",
     },
     "curve": {
         "delimiter": ",",
@@ -35,6 +91,10 @@ BANK_FORMATS = {
         "signRule": "expense_unless_refund",
         "typeField": "Type",
         "refundValue": "REFUNDED",
+        "accountNumberField": "Card Last 4 Digits",
+        "categoryField": "Category",
+        "categoryMap": CURVE_CATEGORY_MAP,
+        "displayName": "Curve",
     },
     "mbh": {
         "delimiter": ";",
@@ -44,9 +104,20 @@ BANK_FORMATS = {
         "amountField": "Összeg",
         "amountLocale": "hu",
         "descriptionFields": ["Megbízás típusa"],
-        "merchantFields": ["Tranzakció helye", "Ellenoldali számla tulajdonosa"],
+        # "Ellenoldali számla tulajdonosa" (counterparty name) comes first -
+        # for transfers/fees/incoming items it's the real merchant/payer
+        # (e.g. "Morgan Stanley"). "Tranzakció helye" (transaction location)
+        # is checked second since for those same row types it's just a
+        # generic channel label ("MobilApp", "Kozpont", "Bankon kivulrol
+        # erkezo") that would otherwise mask the real counterparty - it's
+        # only the genuine merchant for card purchases, which have no counterparty.
+        "merchantFields": ["Ellenoldali számla tulajdonosa", "Tranzakció helye"],
         "currencyField": "Devizanem",
         "signRule": "as_is",
+        "accountNumberField": "Számla",
+        "categoryField": "Megbízás típusa",
+        "categoryMap": MBH_CATEGORY_MAP,
+        "displayName": "MBH Bank",
     },
     "kh": {
         "delimiter": "\t",
@@ -59,6 +130,10 @@ BANK_FORMATS = {
         "merchantFields": ["partner elnevezése"],
         "currencyField": "összeg devizaneme",
         "signRule": "as_is",
+        "accountNumberField": "könyvelési számla",
+        "categoryField": "típus",
+        "categoryMap": KH_CATEGORY_MAP,
+        "displayName": "K&H Bank",
     },
     "generic": {
         "delimiter": ",",
@@ -71,6 +146,8 @@ BANK_FORMATS = {
         "merchantFields": ["merchant"],
         "currencyField": "currency",
         "signRule": "as_is",
+        "accountNumberField": None,
+        "displayName": "New",
     },
 }
 
