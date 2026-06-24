@@ -79,7 +79,7 @@ def test_retrain_with_corrections_in_a_single_category_does_not_crash(predictor,
     # crash retrain() with sklearn's "needs at least 2 classes" error, because
     # retrain() fit on the corrections alone instead of merging with the seed
     # baseline.
-    predictor.retrain(db_session, [("My Local Store", "groceries", -3000.0), ("Another Shop", "groceries", -3000.0)])
+    predictor.retrain(db_session, [("My Local Store", "groceries", -3000.0, "2024-01-15"), ("Another Shop", "groceries", -3000.0, "2024-01-16")])
 
     category, _ = predictor.predict(db_session, "My Local Store")
     assert category in CategoryService.get_ml_index_map(db_session)
@@ -89,7 +89,7 @@ def test_retrain_does_not_forget_categories_absent_from_corrections(predictor, d
     # Corrections only ever cover "groceries", but the model must still be
     # able to predict "rent" afterwards because the seed baseline is merged
     # in - retraining shouldn't erase categories the user hasn't corrected.
-    predictor.retrain(db_session, [("Corner Shop", "groceries", -3000.0)])
+    predictor.retrain(db_session, [("Corner Shop", "groceries", -3000.0, "2024-01-15")])
 
     category, _ = predictor.predict(db_session, "Monthly Rent Payment")
     assert category == "rent"

@@ -30,8 +30,10 @@ Always deletes all transactions and leaves accounts untouched. Separately asks w
 Established this session, keep following it:
 1. State the issue, find the root cause (read the code, don't guess).
 2. Propose the smallest viable fix — no drive-by refactors, no unrelated cleanup.
-3. Implement, add/update a test, run the real test suite.
-4. If the fix is large or changes architecture, explain and ask before doing it.
+3. Implement it and ask user to run the *existing* test suite — don't write or update tests yet.
+4. Let the user test the change themselves and confirm it actually works as expected.
+5. Only after that approval, ask before adding/updating tests to cover it.
+6. If the fix is large or changes architecture, explain and ask before doing it.
 
 Priority order when several things are wrong (highest first): data correctness → transfer-detection accuracy → categorization quality → user-correction feedback loop → frontend usability → dashboard insights → performance → code cleanup.
 

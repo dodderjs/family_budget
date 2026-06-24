@@ -1,6 +1,8 @@
 import joblib
 import os
 import re
+import unicodedata
+from datetime import datetime
 from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -8,6 +10,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
+from app.models.transaction import TrainingData
 from app.services.category_service import CategoryService
 
 MODEL_DIR = Path(__file__).parent.parent / "ml" / "models"
@@ -41,6 +44,34 @@ def _match_known_merchant(text: str) -> Optional[str]:
             if re.search(r"\b" + re.escape(keyword) + r"\b", lowered):
                 return category
     return None
+
+
+# Descriptions that carry no merchant identity - never used as a memory key, so
+# every uncategorizable row doesn't collapse onto one shared key and start
+# answering for the others. "Unknown transaction" is normalization.py's
+# placeholder for a row with no description at all.
+_NON_MERCHANT_DESCRIPTIONS = {"", "unknown transaction"}
+
+
+def _merchant_key(text: str) -> str:
+    """Conservative normalized key for the per-user merchant-memory lookup.
+
+    Accent-folds (NFKD, same as category_service.slugify so 'kártyadíj' and an
+    ascii-typed variant agree), lowercases, drops digits (store/terminal/card
+    numbers vary per visit) and collapses every other non-alphanumeric run to a
+    single space. Deliberately *exact* after this - it does no fuzzy matching,
+    so memory only fires on a genuinely identical merchant string and never
+    mislabels a near-neighbour; the char-ngram model is what generalizes across
+    variants. Returns "" for descriptions with no merchant identity (see
+    _NON_MERCHANT_DESCRIPTIONS), which the caller treats as "don't store/look up"."""
+    if not text:
+        return ""
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    key = re.sub(r"[0-9]+", " ", ascii_text.lower())
+    key = re.sub(r"[^a-z]+", " ", key).strip()
+    if key in _NON_MERCHANT_DESCRIPTIONS:
+        return ""
+    return key
 
 
 def _label_to_index(db: Session, label: str) -> int:
@@ -80,11 +111,18 @@ def _category_allowed(db: Session, category: str, amount: float, account_type: s
 # classes (which LogisticRegression.fit() can't handle). (text, label, amount)
 # - amount is a representative magnitude (HUF, signed per CATEGORY_SIGN) so
 # the model also learns that category from typical transaction size, not
-# just text. Real Hungarian merchant names are pulled from example/ exports
-# (the same evidence KNOWN_MERCHANT_CATEGORIES above is grounded in) so the
-# model has real vocabulary to fall back on for near-misses the deterministic
-# lookup doesn't catch (different store number, city, branch suffix, etc.)
-# rather than only the original English placeholder phrases.
+# just text. Seeds carry no date: the temporal day-of-month/day-of-week
+# features (see _temporal_features) are learned purely from real user
+# corrections. A hand-picked representative day per seed was tried and removed
+# - with a single example per recurring category the linear model treats that
+# day as a hard separator and then misclassifies the same category on any
+# other day (or with no date), so seeds feed a neutral (zero) temporal signal
+# and the feature only starts discriminating once enough genuinely-dated
+# corrections accumulate. Real Hungarian merchant names are pulled from
+# example/ exports (the same evidence KNOWN_MERCHANT_CATEGORIES above is
+# grounded in) so the model has real vocabulary to fall back on for near-misses
+# the deterministic lookup doesn't catch (different store number, city, branch
+# suffix, etc.) rather than only the original English placeholder phrases.
 SEED_DATA = [
     ("Grocery Store", "groceries", -3500.0),
     ("Supermarket", "groceries", -3500.0),
@@ -225,6 +263,41 @@ def _amount_feature(amount: float = None) -> float:
     return _scaled_amount(amount)
 
 
+# Number of dense temporal columns appended after the amount feature: a sin/cos
+# pair each for day-of-month and day-of-week (see _temporal_features). Used both
+# to build the feature matrix and as the load_model() shape check.
+_N_TEMPORAL_FEATURES = 4
+
+
+def _parse_date_parts(date: str = None) -> tuple[Optional[int], Optional[int]]:
+    """Split an ISO 'YYYY-MM-DD' string into (day_of_month 1-31, day_of_week
+    0=Mon..6=Sun). Returns (None, None) for a missing/unparseable date so the
+    temporal features fall back to neutral - same tolerance as the amount
+    feature's None handling."""
+    if not date:
+        return None, None
+    try:
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None, None
+    return parsed.day, parsed.weekday()
+
+
+def _cyclical(value: Optional[int], period: int, base: int) -> tuple[float, float]:
+    """Encode a periodic integer as a (sin, cos) pair so a linear model can use
+    its position on the cycle without treating the wrap-around (e.g. day 31 ->
+    day 1) as a large jump. value=None -> (0, 0): a zero-magnitude vector that
+    carries no positional signal, the natural neutral for an unknown date."""
+    if value is None:
+        return 0.0, 0.0
+    angle = 2.0 * np.pi * (value - base) / period
+    return float(np.sin(angle)), float(np.cos(angle))
+
+
+def _temporal_features(day_of_month: Optional[int], day_of_week: Optional[int]) -> list[float]:
+    return [*_cyclical(day_of_month, 31, 1), *_cyclical(day_of_week, 7, 0)]
+
+
 class CategoryPredictor:
     def __init__(self):
         self.vectorizer = None
@@ -242,42 +315,71 @@ class CategoryPredictor:
         model_path = MODEL_DIR / "model.pkl"
 
         if vectorizer_path.exists() and model_path.exists():
-            self.vectorizer = joblib.load(vectorizer_path)
-            self.model = joblib.load(model_path)
+            vectorizer = joblib.load(vectorizer_path)
+            model = joblib.load(model_path)
+            # Discard a persisted model whose feature width doesn't match what
+            # _build_features now produces (text vocab + amount + temporal). An
+            # older pickle predates the temporal columns, so feeding it the new
+            # wider matrix would raise inside predict() and be silently swallowed
+            # into ("other", 0.0) forever. Dropping it here makes the next
+            # predict()/retrain() rebuild the baseline at the current shape.
+            expected = len(vectorizer.vocabulary_) + 1 + _N_TEMPORAL_FEATURES
+            if getattr(model, "n_features_in_", expected) != expected:
+                return
+            self.vectorizer = vectorizer
+            self.model = model
 
     def _create_baseline(self, db: Session):
-        """Create baseline model with seed data"""
+        """Create baseline model with seed data. Seeds carry no date, so their
+        temporal features are left neutral (see _fit's None defaults)."""
         texts = [desc for desc, _, _ in SEED_DATA]
         labels = [cat for _, cat, _ in SEED_DATA]
         amounts = [amt for _, _, amt in SEED_DATA]
         self._fit(db, texts, labels, amounts)
 
-    def _build_features(self, texts: list[str], amounts: list[float]):
-        """Combine TF-IDF text features with a single scaled amount-magnitude
-        feature into one sparse matrix. analyzer='char_wb' (character
-        n-grams) generalizes far better than word-level matching for
-        morphologically rich, accented text (Hungarian merchant names) and
-        for near-duplicate strings that only differ in a store number or
-        city suffix - e.g. "Lidl HU 334 Debrecen" vs "Lidl HU 220 Budapest"
-        share plenty of 3-5 char substrings even though no whole word matches."""
-        text_features = self.vectorizer.transform([t.lower() for t in texts])
-        amount_features = csr_matrix([[_amount_feature(a)] for a in amounts])
-        return hstack([text_features, amount_features]).tocsr()
+    def _dense_features(self, amounts, days_of_month=None, days_of_week=None):
+        """The dense per-row block appended to the TF-IDF text features:
+        [scaled_amount, day_of_month sin/cos, day_of_week sin/cos]. A None day
+        list (e.g. seed data, which carries no date) means every row's temporal
+        features fall back to neutral."""
+        if days_of_month is None:
+            days_of_month = [None] * len(amounts)
+        if days_of_week is None:
+            days_of_week = [None] * len(amounts)
+        return csr_matrix([
+            [_amount_feature(a), *_temporal_features(dom, dow)]
+            for a, dom, dow in zip(amounts, days_of_month, days_of_week)
+        ])
 
-    def _fit(self, db: Session, texts: list[str], labels: list[str], amounts: list[float] = None) -> bool:
-        """Fit the vectorizer+model on (text, label, amount) data and persist
-        it. Returns False without touching the existing model if there are
-        fewer than 2 distinct labels, since LogisticRegression can't fit on a
-        single class."""
+    def _build_features(self, texts: list[str], amounts: list[float], days_of_month=None, days_of_week=None):
+        """Combine TF-IDF text features with the dense amount+temporal block
+        into one sparse matrix. analyzer='char_wb' (character n-grams)
+        generalizes far better than word-level matching for morphologically
+        rich, accented text (Hungarian merchant names) and for near-duplicate
+        strings that only differ in a store number or city suffix - e.g.
+        "Lidl HU 334 Debrecen" vs "Lidl HU 220 Budapest" share plenty of 3-5
+        char substrings even though no whole word matches."""
+        text_features = self.vectorizer.transform([t.lower() for t in texts])
+        return hstack([text_features, self._dense_features(amounts, days_of_month, days_of_week)]).tocsr()
+
+    def _fit(self, db: Session, texts: list[str], labels: list[str], amounts: list[float] = None,
+             days_of_month: list = None, days_of_week: list = None) -> bool:
+        """Fit the vectorizer+model on (text, label, amount, date-parts) data
+        and persist it. Returns False without touching the existing model if
+        there are fewer than 2 distinct labels, since LogisticRegression can't
+        fit on a single class."""
         if len({_label_to_index(db, label) for label in labels}) < 2:
             return False
         if amounts is None:
             amounts = [None] * len(texts)
+        if days_of_month is None:
+            days_of_month = [None] * len(texts)
+        if days_of_week is None:
+            days_of_week = [None] * len(texts)
 
         vectorizer = TfidfVectorizer(lowercase=True, analyzer='char_wb', ngram_range=(3, 5))
         text_features = vectorizer.fit_transform([t.lower() for t in texts])
-        amount_features = csr_matrix([[_amount_feature(a)] for a in amounts])
-        X = hstack([text_features, amount_features]).tocsr()
+        X = hstack([text_features, self._dense_features(amounts, days_of_month, days_of_week)]).tocsr()
 
         model = LogisticRegression(multi_class='multinomial', max_iter=1000)
         y = np.array([_label_to_index(db, label) for label in labels])
@@ -288,18 +390,47 @@ class CategoryPredictor:
         self.save_model()
         return True
 
-    def predict(self, db: Session, description: str, amount: float = None, account_type: str = None) -> tuple[str, float]:
+    def _merchant_memory(self, db: Session, description: str, amount: float = None,
+                         account_type: str = None) -> Optional[tuple[str, float]]:
+        """Per-user merchant recall: if the user has previously corrected (or a
+        bank hint has labelled) a transaction whose description normalizes to
+        the same merchant key, return that label directly. The most recent
+        correction wins, so a later re-categorization supersedes an earlier one.
+        Still passes through _category_allowed so a remembered label that
+        contradicts this row's amount sign/account is skipped rather than
+        forced. Returns None (fall through to the model) when there's no key or
+        no allowed match."""
+        key = _merchant_key(description)
+        if not key:
+            return None
+        row = (db.query(TrainingData)
+               .filter(TrainingData.merchant_key == key)
+               .order_by(TrainingData.created_at.desc())
+               .first())
+        if row and (amount is None or _category_allowed(db, row.corrected_label, amount, account_type)):
+            return row.corrected_label, 1.0
+        return None
+
+    def predict(self, db: Session, description: str, amount: float = None, account_type: str = None,
+                date: str = None) -> tuple[str, float]:
         """Predict category and confidence for a transaction description.
         If `amount` is given, only considers categories whose sign (see
         Category.sign) matches its direction - the model's raw ranking is
         otherwise unconstrained. `account_type` adds a further veto: a
         positive amount on a credit account is a balance payback, not
-        income, regardless of what sign alone allows.
+        income, regardless of what sign alone allows. `date` (ISO YYYY-MM-DD)
+        feeds the model's day-of-month/day-of-week features.
 
-        A known-merchant match (see KNOWN_MERCHANT_CATEGORIES) is checked
-        first and, if allowed for this amount/account, returned immediately
-        at full confidence - no point asking a small text model to guess at
-        something already unambiguous."""
+        Two high-precision layers are checked before the model, each returned
+        immediately at full confidence if allowed for this amount/account:
+        first the user's own merchant memory (a previously corrected/hinted
+        label for the same merchant), then the hardcoded KNOWN_MERCHANT_CATEGORIES.
+        Memory wins over the hardcoded list so an explicit user correction
+        overrides a global default."""
+        remembered = self._merchant_memory(db, description, amount, account_type)
+        if remembered:
+            return remembered
+
         known = _match_known_merchant(description)
         if known and (amount is None or _category_allowed(db, known, amount, account_type)):
             return known, 1.0
@@ -308,7 +439,8 @@ class CategoryPredictor:
             self._create_baseline(db)
 
         try:
-            X = self._build_features([description], [amount])
+            day_of_month, day_of_week = _parse_date_parts(date)
+            X = self._build_features([description], [amount], [day_of_month], [day_of_week])
             probabilities = self.model.predict_proba(X)[0]
             # Rank by probability, descending, then walk down until we hit a
             # category the amount's sign actually allows.
@@ -344,24 +476,36 @@ class CategoryPredictor:
             model_path.unlink()
         self._create_baseline(db)
 
-    def retrain(self, db: Session, training_data: list[tuple[str, str, float]]):
+    def retrain(self, db: Session, training_data: list[tuple[str, str, float, str]]):
         """
         Retrain on the seed baseline plus all accumulated user corrections.
         The baseline is always included so retraining never drops a category
         the user hasn't happened to correct yet (and never ends up with the
-        single-class data LogisticRegression can't fit on). Each correction
-        is (description, corrected_label, amount); amount may be None for
-        corrections recorded before that was tracked - treated as 0 for the
-        feature, same as predict()'s default.
+        single-class data LogisticRegression can't fit on). Each correction is
+        (description, corrected_label, amount, date); amount/date may be None
+        for corrections recorded before they were tracked - both fall back to
+        the same neutral features predict() uses for unknown values.
         """
         if not training_data:
             return
 
-        combined = SEED_DATA + training_data
-        texts = [desc for desc, _, _ in combined]
-        labels = [cat for _, cat, _ in combined]
-        amounts = [amt for _, _, amt in combined]
-        self._fit(db, texts, labels, amounts)
+        # Seeds (text, label, amount) carry no date, corrections add an ISO date
+        # parsed into day-of-month + day-of-week, so build the parallel feature
+        # lists rather than concatenating mismatched-width tuples. Seeds get a
+        # neutral (None) temporal signal; the temporal features are learned from
+        # the dated corrections only.
+        texts = [desc for desc, _, _ in SEED_DATA] + [desc for desc, _, _, _ in training_data]
+        labels = [cat for _, cat, _ in SEED_DATA] + [cat for _, cat, _, _ in training_data]
+        amounts = [amt for _, _, amt in SEED_DATA] + [amt for _, _, amt, _ in training_data]
+
+        days_of_month = [None] * len(SEED_DATA)
+        days_of_week = [None] * len(SEED_DATA)
+        for _, _, _, date in training_data:
+            dom, dow = _parse_date_parts(date)
+            days_of_month.append(dom)
+            days_of_week.append(dow)
+
+        self._fit(db, texts, labels, amounts, days_of_month, days_of_week)
 
 # Global instance
 predictor = CategoryPredictor()

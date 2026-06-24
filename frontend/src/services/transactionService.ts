@@ -22,6 +22,33 @@ export interface Transaction {
   updated_at: string;
 }
 
+/** The Review page's grid drives its own pager/sort instead of loading
+ * everything and paging client-side - limit/offset/sort_by/sort_dir are sent
+ * straight through to GET /transactions/review on every page or sort change.
+ * sort_by must be one of the backend's whitelisted columns (see
+ * _REVIEW_SORTABLE_COLUMNS in transaction_service.py) - anything else falls
+ * back to the default lowest-confidence-first ordering. */
+export interface ReviewTransactionsParams {
+  limit?: number;
+  offset?: number;
+  account_id?: string | null;
+  date_from?: string | null;
+  date_to?: string | null;
+  include_finalized?: boolean;
+  sort_by?: string | null;
+  sort_dir?: 'asc' | 'desc';
+  // AG Grid's per-column filterModel, JSON-stringified - it's a nested object
+  // (keyed by colId) so it can't be a flat query param. The backend whitelists
+  // which colIds it honors (see _REVIEW_FILTERABLE_COLUMNS in
+  // transaction_service.py) and ignores a malformed value.
+  filter_model?: string | null;
+}
+
+export interface TransactionListResponse {
+  items: Transaction[];
+  total: number;
+}
+
 export interface Card {
   id: string;
   account_id: string;
@@ -103,6 +130,9 @@ export interface CategoryNode {
   sign: 'positive' | 'negative' | null;
   requires_transfer_account: boolean;
   ml_index: number | null;
+  // How many transactions currently have category_final set to this leaf
+  // (0 for mains - never assigned to a transaction directly).
+  transaction_count: number;
   created_at: string;
 }
 
@@ -142,16 +172,8 @@ export const transactionService = {
   getTransaction: (id: string) =>
     api.get<Transaction>(`/transactions/${id}`),
 
-  getReviewTransactions: (
-    limit = 50,
-    account_id?: string | null,
-    date_from?: string | null,
-    date_to?: string | null,
-    include_finalized = false
-  ) =>
-    api.get<Transaction[]>('/transactions/review', {
-      params: { limit, account_id, date_from, date_to, include_finalized },
-    }),
+  getReviewTransactions: (params: ReviewTransactionsParams) =>
+    api.get<TransactionListResponse>('/transactions/review', { params }),
 
   updateTransaction: (id: string, category_final?: string, merchant?: string) =>
     api.patch<Transaction>(`/transactions/${id}`, { category_final, merchant }),

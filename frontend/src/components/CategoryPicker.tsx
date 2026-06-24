@@ -1,201 +1,207 @@
-import { Button, Group, Popover, Select, Stack, TextInput } from '@mantine/core';
-import React, { useMemo, useState } from 'react';
+import {
+  Autocomplete,
+  Box,
+  createFilterOptions,
+  createTheme,
+  IconButton,
+  TextField,
+  ThemeProvider,
+  Typography,
+} from '@mui/material';
+import React, { useMemo } from 'react';
 import { transactionService } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
 
-const CREATE_NEW = '__create_new__';
+// Matches the app's dark Mantine theme so the dropdown doesn't look like a
+// foreign light-mode popup dropped into a dark grid cell.
+const muiDarkTheme = createTheme({ palette: { mode: 'dark' } });
+
+// Matches Mantine's size="xs" Select (used for the Transfer column right
+// next to this one in the grid) so the two controls line up visually.
+const CONTROL_HEIGHT = 30;
+const CONTROL_FONT_SIZE = '0.75rem';
+
+interface LeafOption {
+  type: 'leaf';
+  key: string;
+  label: string;
+  mainId: string;
+  mainLabel: string;
+  transactionCount: number;
+}
+
+interface AddMainOption {
+  type: 'add-main';
+  key: '__add_main__';
+  label: string;
+  newMainLabel: string;
+}
+
+type Option = LeafOption | AddMainOption;
+
+const filter = createFilterOptions<Option>({ stringify: (option) => option.label });
 
 interface CategoryPickerProps {
-  /** The current leaf category's key, or null/empty if none picked yet. */
   value: string | null;
-  /** Drives sign-based filtering of leaf suggestions, mirroring the old
-   * categorySuggestionsForAmount logic. */
-  amount: number;
   onChange: (leafKey: string) => void;
   error?: boolean;
   placeholder?: string;
 }
 
-/** Two-step picker: choose (or create) a main category, then choose (or
- * create) a leaf under it. Built from plain Mantine Selects inside a
- * Popover rather than a custom creatable-combobox primitive - simpler to
- * get right and fits an AG Grid cell's tight width. */
-export const CategoryPicker: React.FC<CategoryPickerProps> = ({ value, amount, onChange, error, placeholder }) => {
+/** Single grouped, searchable Autocomplete: leaves are grouped by their main
+ * category, typing filters both, a "+" on a group header adds a new leaf
+ * under that main, and typing a name with no matching main shows an
+ * "Add main category" option at the end of the list. The full hierarchy is
+ * always shown regardless of the transaction's amount sign - an earlier
+ * version filtered leaves by sign (income vs expense categories), but that
+ * hid most of the seed hierarchy on every row, which was more confusing
+ * than useful. */
+export const CategoryPicker: React.FC<CategoryPickerProps> = ({ value, onChange, error, placeholder }) => {
   const categories = useTransactionStore((s) => s.categories);
   const loadCategories = useTransactionStore((s) => s.loadCategories);
   const setError = useTransactionStore((s) => s.setError);
 
-  const [opened, setOpened] = useState(false);
-  const [mainId, setMainId] = useState<string | null>(null);
-  const [creatingMain, setCreatingMain] = useState(false);
-  const [newMainLabel, setNewMainLabel] = useState('');
-  const [creatingLeaf, setCreatingLeaf] = useState(false);
-  const [newLeafLabel, setNewLeafLabel] = useState('');
-
   const mains = useMemo(() => categories.filter((c) => !c.parent_id), [categories]);
-  const currentLeaf = useMemo(() => categories.find((c) => c.key === value) || null, [categories, value]);
+  const mainLabelById = useMemo(() => Object.fromEntries(mains.map((m) => [m.id, m.label])), [mains]);
+  const mainIdByLabel = useMemo(() => Object.fromEntries(mains.map((m) => [m.label, m.id])), [mains]);
 
-  const leavesForMain = useMemo(() => {
-    if (!mainId) return [];
+  const options: LeafOption[] = useMemo(() => {
     return categories
-      .filter((c) => c.parent_id === mainId)
-      .filter((c) => {
-        if (!c.sign) return true;
-        if (amount > 0) return c.sign === 'positive';
-        if (amount < 0) return c.sign === 'negative';
-        return true;
-      });
-  }, [categories, mainId, amount]);
+      .filter((c) => !!c.parent_id)
+      .map((leaf) => ({
+        type: 'leaf' as const,
+        key: leaf.key,
+        label: leaf.label,
+        mainId: leaf.parent_id as string,
+        mainLabel: mainLabelById[leaf.parent_id as string] || 'Other',
+        transactionCount: leaf.transaction_count,
+      }))
+      .sort((a, b) => a.mainLabel.localeCompare(b.mainLabel) || a.label.localeCompare(b.label));
+  }, [categories, mainLabelById]);
 
-  // Defaults to the leaf already assigned to this row (if it belongs to the
-  // chosen main) - otherwise the first available leaf under that main, so
-  // the picker never opens (or switches main) onto a blank selection.
-  const selectedLeafId = useMemo(() => {
-    if (currentLeaf && currentLeaf.parent_id === mainId) return currentLeaf.id;
-    return leavesForMain[0]?.id || null;
-  }, [currentLeaf, mainId, leavesForMain]);
+  const selectedOption = useMemo(() => options.find((o) => o.key === value) || null, [options, value]);
 
-  const openPopover = () => {
-    // Defaults to the predicted/current leaf's main - or, if there isn't
-    // one yet, the first main in the list, so the picker never opens on a
-    // totally blank "Pick a main category" state.
-    setMainId(currentLeaf?.parent_id || mains[0]?.id || null);
-    setCreatingMain(false);
-    setCreatingLeaf(false);
-    setNewMainLabel('');
-    setNewLeafLabel('');
-    setOpened(true);
-  };
-
-  const handleMainChange = (val: string | null) => {
-    if (val === CREATE_NEW) {
-      setCreatingMain(true);
-      return;
-    }
-    setMainId(val);
-    setCreatingLeaf(false);
-  };
-
-  const handleSaveMain = async () => {
-    if (!newMainLabel.trim()) return;
+  const handleAddLeafToGroup = async (mainId: string, mainLabel: string) => {
+    const label = window.prompt(`New category under "${mainLabel}":`);
+    if (!label || !label.trim()) return;
     try {
-      const response = await transactionService.createMainCategory(newMainLabel.trim());
-      await loadCategories();
-      setMainId(response.data.id);
-      setCreatingMain(false);
-      setNewMainLabel('');
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to create category');
-    }
-  };
-
-  const handleLeafChange = (val: string | null) => {
-    if (val === CREATE_NEW) {
-      setCreatingLeaf(true);
-      return;
-    }
-    if (val) {
-      const leaf = categories.find((c) => c.id === val);
-      if (leaf) {
-        onChange(leaf.key);
-        setOpened(false);
-      }
-    }
-  };
-
-  const handleSaveLeaf = async () => {
-    if (!newLeafLabel.trim() || !mainId) return;
-    try {
-      const response = await transactionService.createLeafCategory(newLeafLabel.trim(), mainId);
+      const response = await transactionService.createLeafCategory(label.trim(), mainId);
       await loadCategories();
       onChange(response.data.key);
-      setCreatingLeaf(false);
-      setNewLeafLabel('');
-      setOpened(false);
     } catch (err: any) {
       setError(err.response?.data?.detail || err.message || 'Failed to create category');
     }
   };
 
-  const mainOptions = [
-    ...mains.map((m) => ({ value: m.id, label: m.label })),
-    { value: CREATE_NEW, label: '+ Create new main category' },
-  ];
-  const leafOptions = [
-    ...leavesForMain.map((l) => ({ value: l.id, label: l.label })),
-    { value: CREATE_NEW, label: '+ Create new category' },
-  ];
+  const handleChange = async (_: React.SyntheticEvent, newValue: Option | null) => {
+    // Clearing isn't a supported operation (no "unset category" endpoint) -
+    // ignore it and the controlled `value` prop snaps back to the prior pick.
+    if (!newValue) return;
+    if (newValue.type === 'add-main') {
+      try {
+        // Mirrors the established default for new top-level categories: a
+        // main plus a same-named leaf, so it's immediately selectable.
+        const mainResponse = await transactionService.createMainCategory(newValue.newMainLabel);
+        const leafResponse = await transactionService.createLeafCategory(newValue.newMainLabel, mainResponse.data.id);
+        await loadCategories();
+        onChange(leafResponse.data.key);
+      } catch (err: any) {
+        setError(err.response?.data?.detail || err.message || 'Failed to create category');
+      }
+      return;
+    }
+    onChange(newValue.key);
+  };
 
   return (
-    <Popover opened={opened} onChange={setOpened} withinPortal position="bottom-start" shadow="md">
-      <Popover.Target>
-        <Button
-          size="xs"
-          variant={error ? 'outline' : 'light'}
-          color={error ? 'red' : undefined}
-          onClick={() => (opened ? setOpened(false) : openPopover())}
-          fullWidth
-          justify="space-between"
-        >
-          {currentLeaf?.label || placeholder || 'Select category'}
-        </Button>
-      </Popover.Target>
-      <Popover.Dropdown>
-        {/* The inner Selects render their dropdown inline (withinPortal:
-            false) rather than in their own portal - otherwise the outer
-            Popover's click-outside detection treats a click on the Select's
-            options (a separate portal under document.body) as "outside"
-            and closes itself immediately. */}
-        <Stack gap="xs" w={240}>
-          <Select
-            label="Main category"
-            placeholder="Pick a main category"
-            data={mainOptions}
-            value={mainId}
-            onChange={handleMainChange}
-            searchable
-            comboboxProps={{ withinPortal: false }}
-          />
-          {creatingMain && (
-            <Group gap="xs" wrap="nowrap">
-              <TextInput
-                placeholder="New main category name"
-                value={newMainLabel}
-                onChange={(e) => setNewMainLabel(e.currentTarget.value)}
-                size="xs"
-                style={{ flex: 1 }}
-                autoFocus
-              />
-              <Button size="xs" onClick={handleSaveMain}>Add</Button>
-            </Group>
-          )}
-
-          {mainId && !creatingMain && (
-            <Select
-              label="Category"
-              placeholder="Pick a category"
-              data={leafOptions}
-              value={selectedLeafId}
-              onChange={handleLeafChange}
-              searchable
-              comboboxProps={{ withinPortal: false }}
-            />
-          )}
-          {creatingLeaf && (
-            <Group gap="xs" wrap="nowrap">
-              <TextInput
-                placeholder="New category name"
-                value={newLeafLabel}
-                onChange={(e) => setNewLeafLabel(e.currentTarget.value)}
-                size="xs"
-                style={{ flex: 1 }}
-                autoFocus
-              />
-              <Button size="xs" onClick={handleSaveLeaf}>Add</Button>
-            </Group>
-          )}
-        </Stack>
-      </Popover.Dropdown>
-    </Popover>
+    <ThemeProvider theme={muiDarkTheme}>
+      <Autocomplete<Option>
+        size="small"
+        fullWidth
+        options={options}
+        value={selectedOption}
+        onChange={handleChange}
+        groupBy={(option) => (option.type === 'leaf' ? option.mainLabel : '')}
+        getOptionLabel={(option) => (typeof option === 'string' ? option : option.label)}
+        isOptionEqualToValue={(option, val) => option.key === val.key}
+        filterOptions={(opts, state) => {
+          const filtered = filter(opts, state);
+          const trimmed = state.inputValue.trim();
+          if (trimmed) {
+            const existingMain = mains.find((m) => m.label.toLowerCase() === trimmed.toLowerCase());
+            if (!existingMain) {
+              filtered.push({
+                type: 'add-main',
+                key: '__add_main__',
+                label: `+ Add main category "${trimmed}"`,
+                newMainLabel: trimmed,
+              });
+            }
+          }
+          return filtered;
+        }}
+        renderOption={(props, option) => {
+          const { key, ...rest } = props as React.HTMLAttributes<HTMLLIElement> & { key?: React.Key };
+          return (
+            <li key={key ?? option.key} {...rest} style={{ fontSize: CONTROL_FONT_SIZE }}>
+              {option.type === 'leaf' && option.transactionCount > 0 ? (
+                <Box sx={{ display: 'flex', flex: 1, justifyContent: 'space-between' }}>
+                  <span>{option.label}</span>
+                  <Typography component="span" sx={{ fontSize: CONTROL_FONT_SIZE, color: 'text.secondary' }}>
+                    {option.transactionCount}
+                  </Typography>
+                </Box>
+              ) : (
+                option.label
+              )}
+            </li>
+          );
+        }}
+        renderGroup={(params) => {
+          if (!params.group) {
+            return (
+              <li key={params.key}>
+                <ul style={{ padding: 0, margin: 0 }}>{params.children}</ul>
+              </li>
+            );
+          }
+          const mainId = mainIdByLabel[params.group];
+          return (
+            <li key={params.key}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', px: 1.5, pt: 1 }}>
+                <Typography sx={{ fontSize: CONTROL_FONT_SIZE, fontWeight: 700, color: 'text.secondary' }}>
+                  {params.group}
+                </Typography>
+                <IconButton
+                  size="small"
+                  sx={{ p: 0.25 }}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAddLeafToGroup(mainId, params.group);
+                  }}
+                >
+                  +
+                </IconButton>
+              </Box>
+              <ul style={{ padding: 0, margin: 0 }}>{params.children}</ul>
+            </li>
+          );
+        }}
+        renderInput={(params) => (
+          <TextField {...params} placeholder={placeholder || 'Select category'} error={error} />
+        )}
+        sx={{
+          '& .MuiOutlinedInput-root': {
+            height: CONTROL_HEIGHT,
+            fontSize: CONTROL_FONT_SIZE,
+          },
+          '& .MuiOutlinedInput-input': {
+            padding: '0 4px',
+            fontSize: CONTROL_FONT_SIZE,
+          },
+        }}
+      />
+    </ThemeProvider>
   );
 };

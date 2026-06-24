@@ -30,10 +30,12 @@ class TransactionResponse(TransactionBase):
     category_final: Optional[str]
     is_transfer: bool
     transfer_match_id: Optional[str]
-    # The account_id of the transaction on the other side of transfer_match_id
-    # - attached by TransactionService at query time (see
-    # _attach_transfer_pair_accounts) so the Review page can show/edit which
-    # account a transfer is paired with without an extra fetch per row.
+    # The account_id to show/edit in the Transfer column - either the other
+    # side of a matched transfer_match_id pairing, or a one-sided
+    # transfer_account_id when no real counterpart transaction exists.
+    # Attached by TransactionService at query time (see
+    # _attach_transfer_pair_accounts) so the Review page can show/edit it
+    # without an extra fetch per row.
     transfer_match_account_id: Optional[str] = None
     card_hint: Optional[str] = None
     is_duplicate: bool = False
@@ -45,6 +47,10 @@ class TransactionResponse(TransactionBase):
 
     class Config:
         from_attributes = True
+
+class TransactionListResponse(BaseModel):
+    items: list[TransactionResponse]
+    total: int
 
 class AccountCreate(BaseModel):
     name: str
@@ -139,6 +145,10 @@ class CategoryResponse(BaseModel):
     sign: Optional[str] = None
     requires_transfer_account: bool = False
     ml_index: Optional[int] = None
+    # How many transactions have category_final actually set to this leaf -
+    # attached by CategoryService.list_categories at query time. Always 0
+    # for mains (never assigned to a transaction directly).
+    transaction_count: int = 0
     created_at: datetime
 
     class Config:

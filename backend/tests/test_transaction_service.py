@@ -5,8 +5,7 @@ from app.services import currency_service
 from app.services.account_service import AccountNotFoundError
 from app.services.ml_service import predictor
 from app.services.transaction_service import (
-    TransactionService, DuplicateTransactionError, TransactionNotFoundError, NoMatchingTransferError,
-    TransferAccountRequiredError
+    TransactionService, DuplicateTransactionError, TransactionNotFoundError
 )
 
 
@@ -30,7 +29,7 @@ def second_account(db_session):
 def mock_predictor(monkeypatch):
     # Isolate these tests from the real ML model (sklearn/joblib), which is
     # unrelated to the dedup logic under test.
-    monkeypatch.setattr(predictor, "predict", lambda db, description, amount=None, account_type=None: ("groceries", 0.9))
+    monkeypatch.setattr(predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.9))
 
 
 def _txn_data(
@@ -77,7 +76,7 @@ def test_card_hint_column_fits_a_full_account_number(db_session, account):
 def test_create_transaction_passes_account_type_through_to_the_predictor(db_session, account, monkeypatch):
     seen = {}
 
-    def fake_predict(db, description, amount=None, account_type=None):
+    def fake_predict(db, description, amount=None, account_type=None, date=None):
         seen["account_type"] = account_type
         return "other", 0.5
 
@@ -139,7 +138,7 @@ def test_ml_prediction_uses_the_converted_huf_amount_not_the_raw_one(db_session,
     )
     seen = {}
 
-    def fake_predict(db, description, amount=None, account_type=None):
+    def fake_predict(db, description, amount=None, account_type=None, date=None):
         seen["amount"] = amount
         return "other", 0.5
 
@@ -215,12 +214,15 @@ def test_update_transaction_category_denormalizes_description_and_amount(db_sess
     assert training.amount == -1234.0
 
 
-def test_finalizing_a_transfer_category_without_a_pairing_raises(db_session, account):
+def test_finalizing_a_transfer_category_without_a_pairing_still_succeeds(db_session, account):
+    # Many real transfers (e.g. a card top-up funded from outside the
+    # tracked accounts) never get a counterpart transaction at all - the
+    # category can still be finalized; only is_transfer/analytics exclusion
+    # waits on an actual pairing (see set_transfer_pair).
     txn = TransactionService.create_transaction(db_session, _txn_data(account.id))
-    with pytest.raises(TransferAccountRequiredError):
-        TransactionService.update_transaction_category(db_session, txn.id, "saving")
-    db_session.refresh(txn)
-    assert txn.category_final is None
+    updated = TransactionService.update_transaction_category(db_session, txn.id, "saving")
+    assert updated.category_final == "saving"
+    assert updated.is_transfer is False
 
 
 def test_finalizing_a_transfer_category_succeeds_once_paired(db_session, account, second_account):
@@ -355,7 +357,10 @@ def test_set_transfer_pair_with_none_clears_an_existing_pairing(db_session, acco
     assert inflow.transfer_match_id is None
 
 
-def test_set_transfer_pair_raises_when_no_candidate_matches(db_session, account, second_account):
+def test_set_transfer_pair_falls_back_to_one_sided_when_no_candidate_matches(db_session, account, second_account):
+    # E.g. a card top-up funded from outside the tracked accounts - there's
+    # no real counterpart transaction to link, but the user still knows
+    # which account it involves.
     out = TransactionService.create_transaction(
         db_session, _txn_data(account.id, fingerprint="fp-out", description="Transfer out", amount=-50000.0)
     )
@@ -363,8 +368,23 @@ def test_set_transfer_pair_raises_when_no_candidate_matches(db_session, account,
         db_session, _txn_data(second_account.id, fingerprint="fp-wrong-sign", description="Same sign", amount=-50000.0)
     )
 
-    with pytest.raises(NoMatchingTransferError):
-        TransactionService.set_transfer_pair(db_session, out.id, second_account.id)
+    updated = TransactionService.set_transfer_pair(db_session, out.id, second_account.id)
+
+    assert updated.is_transfer is True
+    assert updated.transfer_match_id is None
+    assert updated.transfer_match_account_id == second_account.id
+
+
+def test_set_transfer_pair_with_none_clears_a_one_sided_pairing(db_session, account, second_account):
+    out = TransactionService.create_transaction(
+        db_session, _txn_data(account.id, fingerprint="fp-out", description="Transfer out", amount=-50000.0)
+    )
+    TransactionService.set_transfer_pair(db_session, out.id, second_account.id)
+
+    updated = TransactionService.set_transfer_pair(db_session, out.id, None)
+
+    assert updated.is_transfer is False
+    assert updated.transfer_match_account_id is None
 
 
 def test_set_transfer_pair_raises_for_unknown_transaction(db_session):

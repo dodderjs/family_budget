@@ -14,7 +14,12 @@ class Account(Base):
     type = Column(String(50), nullable=True)  # Credit, Debit, Saving, Prepaid, Curve, etc.
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    transactions = relationship("Transaction", back_populates="account")
+    # foreign_keys is required here since transactions now has two FKs to
+    # accounts (account_id and transfer_account_id) - without it SQLAlchemy
+    # can't tell which one this relationship should join on.
+    transactions = relationship(
+        "Transaction", back_populates="account", foreign_keys="Transaction.account_id"
+    )
     cards = relationship("Card", back_populates="account")
 
 class Card(Base):
@@ -63,6 +68,13 @@ class Transaction(Base):
     category_final = Column(String(50), nullable=True)
     is_transfer = Column(Boolean, default=False)
     transfer_match_id = Column(String(36), nullable=True)
+    # Set instead of transfer_match_id when set_transfer_pair finds no real
+    # counterpart transaction to link (e.g. a card top-up funded from
+    # outside the tracked accounts) - records which account the user says
+    # this is a transfer to/from without claiming a specific other
+    # transaction exists. Mutually exclusive with transfer_match_id in
+    # practice, but not DB-enforced since the cost of that isn't worth it.
+    transfer_account_id = Column(String(36), ForeignKey("accounts.id"), nullable=True)
     # Per-row card/account identifier from the bank format's accountNumberField
     # (e.g. Curve's "Card Last 4 Digits", or MBH/KH's full account number) -
     # used to cross-reference against other accounts' registered Cards. Not
@@ -77,7 +89,7 @@ class Transaction(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    account = relationship("Account", back_populates="transactions")
+    account = relationship("Account", back_populates="transactions", foreign_keys=[account_id])
 
 class AccountCoverageFlag(Base):
     """User-confirmed status for a month that has zero transactions in an
@@ -144,6 +156,17 @@ class TrainingData(Base):
     # model's amount-magnitude feature (see ml_service.py) without needing
     # the original transaction to still exist.
     amount = Column(Float, nullable=True)
+    # Denormalized ISO date (YYYY-MM-DD) of the corrected transaction. Feeds
+    # the model's day-of-month/day-of-week features in retrain() - kept here,
+    # like description/amount, so a correction survives its transaction's
+    # deletion and still trains the temporal signal.
+    transaction_date = Column(String(10), nullable=True)
+    # Normalized merchant key (see ml_service._merchant_key) for the per-user
+    # merchant-memory lookup: predict() resolves this row's corrected_label
+    # directly for any future transaction whose description normalizes to the
+    # same key, before consulting the model. Indexed since predict() queries
+    # by it on every prediction.
+    merchant_key = Column(String(255), nullable=True, index=True)
     original_label = Column(String(50), nullable=False)
     corrected_label = Column(String(50), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)

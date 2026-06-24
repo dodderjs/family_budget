@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
+import json
 from app.db.database import get_db
 from app.models.schemas import (
-    UploadRequest, TransactionResponse, TransactionUpdate, TransferPairUpdate,
+    UploadRequest, TransactionResponse, TransactionListResponse, TransactionUpdate, TransferPairUpdate,
     AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
     CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate,
     CategoryCreate, CategoryResponse
 )
 from app.services.transaction_service import (
-    TransactionService, DuplicateTransactionError, TransactionNotFoundError, NoMatchingTransferError,
-    TransferAccountRequiredError
+    TransactionService, DuplicateTransactionError, TransactionNotFoundError
 )
 from app.services.account_service import (
     AccountService, AccountNotFoundError, AccountHasTransactionsError,
@@ -213,20 +213,36 @@ def list_transactions(
     """List transactions"""
     return TransactionService.get_transactions(db, account_id, limit, offset)
 
-@router.get("/transactions/review", response_model=list[TransactionResponse])
+@router.get("/transactions/review", response_model=TransactionListResponse)
 def get_review_transactions(
     limit: int = 50,
+    offset: int = 0,
     account_id: str = None,
     date_from: str = None,
     date_to: str = None,
     include_finalized: bool = False,
+    sort_by: str = None,
+    sort_dir: str = "asc",
+    filter_model: str = None,
     db: Session = Depends(get_db)
 ):
-    """Get transactions pending review (no final category by default; pass
-    include_finalized=true to also show already-confirmed ones)"""
-    return TransactionService.get_transactions_for_review(
-        db, limit, account_id, date_from, date_to, include_finalized
+    """Get one page of transactions pending review (no final category by
+    default; pass include_finalized=true to also show already-confirmed
+    ones). sort_by/sort_dir drive the AG Grid column-header sort on the
+    Review page - see _REVIEW_SORTABLE_COLUMNS for the whitelist. filter_model
+    is the AG Grid per-column filterModel as a JSON string (the SSRM datasource
+    sends a nested object, so it can't be a flat query param); a malformed one
+    is ignored rather than failing the request - see _apply_column_filters."""
+    parsed_filter = None
+    if filter_model:
+        try:
+            parsed_filter = json.loads(filter_model)
+        except (ValueError, TypeError):
+            parsed_filter = None
+    items, total = TransactionService.get_transactions_for_review(
+        db, limit, account_id, date_from, date_to, include_finalized, offset, sort_by, sort_dir, parsed_filter
     )
+    return {"items": items, "total": total}
 
 @router.get("/transactions/{transaction_id}", response_model=TransactionResponse)
 def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
@@ -250,12 +266,9 @@ def update_transaction(
         raise HTTPException(status_code=404, detail="Transaction not found")
 
     if update.category_final:
-        try:
-            transaction = TransactionService.update_transaction_category(
-                db, transaction_id, update.category_final
-            )
-        except TransferAccountRequiredError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        transaction = TransactionService.update_transaction_category(
+            db, transaction_id, update.category_final
+        )
 
     if update.merchant is not None:
         transaction.merchant = update.merchant
@@ -277,11 +290,6 @@ def update_transfer_pair(transaction_id: str, update: TransferPairUpdate, db: Se
         raise HTTPException(status_code=404, detail="Transaction not found")
     except AccountNotFoundError:
         raise HTTPException(status_code=404, detail="Account not found")
-    except NoMatchingTransferError:
-        raise HTTPException(
-            status_code=400,
-            detail="No matching transaction found in that account (opposite sign, equal amount, within 2 days)",
-        )
 
 @router.get("/analytics/summary")
 def get_analytics_summary(
@@ -323,22 +331,24 @@ def retrain_model(db: Session = Depends(get_db)):
     if not training_data:
         return {"status": "no_training_data"}
 
-    # description/amount are denormalized onto TrainingData at creation time
-    # so a correction still trains the model after its original transaction
-    # is gone (e.g. reset_data.py's transactions-only reset). Older rows from
-    # before that change fall back to the join.
+    # description/amount/transaction_date are denormalized onto TrainingData at
+    # creation time so a correction still trains the model after its original
+    # transaction is gone (e.g. reset_data.py's transactions-only reset). Older
+    # rows from before that change fall back to the join.
     data = []
     for td in training_data:
         description = td.description
         amount = td.amount
+        date = td.transaction_date
         if not description and td.transaction_id:
             transaction = db.query(Transaction).filter(
                 Transaction.id == td.transaction_id
             ).first()
             description = transaction.description if transaction else None
             amount = transaction.amount if transaction else None
+            date = transaction.date if transaction else None
         if description:
-            data.append((description, td.corrected_label, amount))
+            data.append((description, td.corrected_label, amount, date))
 
     if data:
         predictor.retrain(db, data)

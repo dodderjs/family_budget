@@ -1,7 +1,8 @@
 import re
 import unicodedata
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.models.transaction import Category
+from app.models.transaction import Category, Transaction
 
 
 class CategoryNotFoundError(Exception):
@@ -91,10 +92,28 @@ class CategoryService:
 
     @staticmethod
     def list_categories(db: Session) -> list[Category]:
-        return db.query(Category).all()
+        """Attaches a transient transaction_count to each leaf - how many
+        transactions actually have category_final set to it. Deliberately
+        only category_final, not category_predicted/is_transfer - this is
+        "how many are actually stored/finalized as this category", not a
+        prediction or analytics total."""
+        categories = db.query(Category).all()
+        counts = dict(
+            db.query(Transaction.category_final, func.count(Transaction.id))
+            .filter(Transaction.category_final.isnot(None))
+            .group_by(Transaction.category_final)
+            .all()
+        )
+        for c in categories:
+            c.transaction_count = counts.get(c.key, 0)
+        return categories
 
     @staticmethod
     def create_main_category(db: Session, label: str) -> Category:
+        existing = CategoryService._find_existing_by_label(db, label, parent_id=None)
+        if existing:
+            return existing
+
         key = CategoryService._unique_key(db, label, is_leaf=False)
         category = Category(key=key, label=label, parent_id=None)
         db.add(category)
@@ -109,6 +128,10 @@ class CategoryService:
             raise CategoryNotFoundError(parent_id)
         if parent.parent_id is not None:
             raise ParentMustBeMainCategoryError(parent_id)
+
+        existing = CategoryService._find_existing_by_label(db, label, parent_id=parent.id)
+        if existing:
+            return existing
 
         key = CategoryService._unique_key(db, label, is_leaf=True)
         next_index = (db.query(Category.ml_index)
@@ -129,6 +152,17 @@ class CategoryService:
         db.commit()
         db.refresh(category)
         return category
+
+    @staticmethod
+    def _find_existing_by_label(db: Session, label: str, parent_id: str | None) -> Category | None:
+        """Case-insensitive, trimmed match scoped to the same level (and,
+        for leaves, the same parent main) - lets re-typing an existing
+        category's name reuse it instead of creating a same-looking
+        duplicate with a disambiguated key (e.g. a second "Loan Principal"
+        under Finance, distinct only in its hidden key)."""
+        scope = Category.parent_id == parent_id if parent_id else Category.parent_id.is_(None)
+        normalized = label.strip().lower()
+        return db.query(Category).filter(scope, func.lower(Category.label) == normalized).first()
 
     @staticmethod
     def _unique_key(db: Session, label: str, is_leaf: bool) -> str:

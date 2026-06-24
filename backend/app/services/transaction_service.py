@@ -1,10 +1,10 @@
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, func
 from app.models.transaction import Transaction, TrainingData, Account, Card
 from app.models.schemas import TransactionCreate, TransactionResponse
 from app.services.account_service import AccountNotFoundError
 from app.services.currency_service import CurrencyService, HUF
-from app.services.ml_service import predictor
-from app.services.category_service import CategoryService
+from app.services.ml_service import predictor, _merchant_key
 from app.services.normalization import detect_transfers, detect_curve_duplicates, _dates_within
 from datetime import datetime
 import json
@@ -18,18 +18,144 @@ class TransactionNotFoundError(Exception):
     """Raised when a transaction_id doesn't match any existing transaction."""
 
 
-class NoMatchingTransferError(Exception):
-    """Raised when no transaction in the chosen account is a plausible
-    transfer match (opposite sign, ~equal magnitude, within the day window)."""
+# Whitelist of columns the Review grid's column headers may sort by - maps
+# the AG Grid colId (identical to the column's `field`) straight to the
+# Transaction column, so the frontend can pass colId through unchanged.
+# Never build the ORDER BY from an unvalidated client string directly.
+_REVIEW_SORTABLE_COLUMNS = {
+    "date": Transaction.date,
+    "amount": Transaction.amount,
+    "account_id": Transaction.account_id,
+    "merchant": Transaction.merchant,
+    "description": Transaction.description,
+    "category_predicted": Transaction.category_predicted,
+    "category_confidence": Transaction.category_confidence,
+    "category_final": Transaction.category_final,
+}
+
+# Columns the Review grid may filter on, mapped from AG Grid colId (== the
+# column's `field`) to the Transaction column. Same security stance as the sort
+# whitelist: the client sends a filterModel keyed by colId and we only ever
+# build conditions for keys in here, so an unknown/spoofed colId is ignored
+# rather than reaching the query. account_id is intentionally absent - the
+# account selection is owned by the app-level FilterBar (multi-select, applied
+# in _apply_filters), so a per-column account filter here would be a confusing
+# duplicate. The transfer-pairing column is a UI-only widget with no backing
+# Transaction column, so it isn't filterable either.
+_REVIEW_FILTERABLE_COLUMNS = {
+    "date": Transaction.date,
+    "amount": Transaction.amount,
+    "description": Transaction.description,
+    "merchant": Transaction.merchant,
+    "category_predicted": Transaction.category_predicted,
+    "category_confidence": Transaction.category_confidence,
+    "category_final": Transaction.category_final,
+}
 
 
-class TransferAccountRequiredError(Exception):
-    """Raised when finalizing a transfer-type category without first setting
-    a transfer pairing (see TransactionService.set_transfer_pair)."""
+def _text_condition(column, op: str, value):
+    """One AG Grid text-filter condition -> SQLAlchemy. Matching is
+    case-insensitive (ilike / lower()) to mirror AG Grid's own client-side
+    text filter. `blank`/`notBlank` treat NULL and empty-string the same."""
+    if op == "blank":
+        return or_(column.is_(None), column == "")
+    if op == "notBlank":
+        return and_(column.isnot(None), column != "")
+    if value is None:
+        return None
+    value = str(value)
+    if op == "equals":
+        return func.lower(column) == value.lower()
+    if op == "notEqual":
+        return or_(column.is_(None), func.lower(column) != value.lower())
+    if op == "contains":
+        return column.ilike(f"%{value}%")
+    if op == "notContains":
+        return or_(column.is_(None), column.notilike(f"%{value}%"))
+    if op == "startsWith":
+        return column.ilike(f"{value}%")
+    if op == "endsWith":
+        return column.ilike(f"%{value}")
+    return None
 
-    def __init__(self, category: str):
-        self.category = category
-        super().__init__(f"Category {category!r} requires a transfer account - set one in the Transfer column first")
+
+def _number_condition(column, op: str, value, value_to):
+    """One AG Grid number-filter condition -> SQLAlchemy."""
+    if op == "blank":
+        return column.is_(None)
+    if op == "notBlank":
+        return column.isnot(None)
+    if op == "inRange":
+        if value is None or value_to is None:
+            return None
+        low, high = sorted((value, value_to))
+        return and_(column >= low, column <= high)
+    if value is None:
+        return None
+    ops = {
+        "equals": column == value,
+        "notEqual": column != value,
+        "greaterThan": column > value,
+        "greaterThanOrEqual": column >= value,
+        "lessThan": column < value,
+        "lessThanOrEqual": column <= value,
+    }
+    return ops.get(op)
+
+
+def _date_condition(column, op: str, date_from, date_to):
+    """One AG Grid date-filter condition -> SQLAlchemy. Transaction.date is a
+    String(10) ISO date, so AG Grid's 'YYYY-MM-DD HH:MM:SS' bounds are sliced
+    to their date part and compared lexically (valid because the format is
+    zero-padded and fixed-width)."""
+    if op == "blank":
+        return or_(column.is_(None), column == "")
+    if op == "notBlank":
+        return and_(column.isnot(None), column != "")
+    lo = date_from[:10] if date_from else None
+    hi = date_to[:10] if date_to else None
+    if op == "inRange":
+        if not lo or not hi:
+            return None
+        low, high = sorted((lo, hi))
+        return and_(column >= low, column <= high)
+    if not lo:
+        return None
+    ops = {
+        "equals": column == lo,
+        "notEqual": or_(column.is_(None), column != lo),
+        "greaterThan": column > lo,
+        "lessThan": column < lo,
+    }
+    return ops.get(op)
+
+
+def _single_condition(column, model: dict):
+    """Dispatch one AG Grid filter condition dict (no AND/OR wrapper) to the
+    right builder by its filterType. Returns a SQLAlchemy expression or None
+    (unknown type/op -> ignored, never an error)."""
+    filter_type = model.get("filterType", "text")
+    op = model.get("type")
+    if not op:
+        return None
+    if filter_type == "number":
+        return _number_condition(column, op, model.get("filter"), model.get("filterTo"))
+    if filter_type == "date":
+        return _date_condition(column, op, model.get("dateFrom"), model.get("dateTo"))
+    return _text_condition(column, op, model.get("filter"))
+
+
+def _build_filter_condition(column, model: dict):
+    """Build a SQLAlchemy condition for one column's AG Grid filter model,
+    handling both a single condition and the combined {operator, conditions:[]}
+    shape (two conditions joined by AND/OR)."""
+    if "operator" in model:
+        conditions = [_single_condition(column, c) for c in model.get("conditions", [])]
+        conditions = [c for c in conditions if c is not None]
+        if not conditions:
+            return None
+        return and_(*conditions) if model["operator"] == "AND" else or_(*conditions)
+    return _single_condition(column, model)
 
 
 class TransactionService:
@@ -66,7 +192,8 @@ class TransactionService:
         # account_type additionally rules out income categories for a
         # positive amount on a credit account - that's a balance payback)
         category, confidence = predictor.predict(
-            db, transaction_data["description"], amount, transaction_data.get("account_type")
+            db, transaction_data["description"], amount,
+            transaction_data.get("account_type"), transaction_data["date"]
         )
 
         # Some bank exports (e.g. Curve) already tag a category. Treat it as
@@ -112,6 +239,8 @@ class TransactionService:
                 transaction_id=db_transaction.id,
                 description=db_transaction.description,
                 amount=db_transaction.amount,
+                transaction_date=db_transaction.date,
+                merchant_key=_merchant_key(db_transaction.description),
                 original_label=category,
                 corrected_label=category_hint,
             ))
@@ -214,6 +343,23 @@ class TransactionService:
         return query
 
     @staticmethod
+    def _apply_column_filters(query, filter_model: dict = None):
+        """Apply the Review grid's per-column AG Grid filterModel. Only colIds
+        in _REVIEW_FILTERABLE_COLUMNS are honored; anything else (unknown or
+        spoofed) is skipped. Each value is parameterized via SQLAlchemy
+        expressions - the client string never reaches the SQL text."""
+        if not filter_model:
+            return query
+        for col_id, model in filter_model.items():
+            column = _REVIEW_FILTERABLE_COLUMNS.get(col_id)
+            if column is None or not isinstance(model, dict):
+                continue
+            condition = _build_filter_condition(column, model)
+            if condition is not None:
+                query = query.filter(condition)
+        return query
+
+    @staticmethod
     def get_transactions(db: Session, account_id: str = None, limit: int = 100, offset: int = 0):
         """Get transactions with optional filtering"""
         query = db.query(Transaction)
@@ -229,16 +375,31 @@ class TransactionService:
         date_from: str = None,
         date_to: str = None,
         include_finalized: bool = False,
+        offset: int = 0,
+        sort_by: str = None,
+        sort_dir: str = "asc",
+        filter_model: dict = None,
     ):
-        """Get transactions for review. By default only ones without a final
-        category; set include_finalized=True to also show already-confirmed
-        ones, so the user can go back and correct a past decision."""
+        """Get one page of transactions for review, plus the total matching
+        count so the frontend can drive its own pager. By default only ones
+        without a final category; set include_finalized=True to also show
+        already-confirmed ones, so the user can go back and correct a past
+        decision. sort_by must be a column the grid actually shows (see
+        _REVIEW_SORTABLE_COLUMNS) - falls back to the original
+        lowest-confidence-first default when omitted or unrecognized.
+        filter_model is the AG Grid per-column filterModel (see
+        _apply_column_filters), applied on top of the app-level account/date
+        filters before the page and the total count are computed."""
         query = db.query(Transaction)
         if not include_finalized:
             query = query.filter(Transaction.category_final == None)
         query = TransactionService._apply_filters(query, account_id, date_from, date_to)
-        results = query.order_by(Transaction.category_confidence.asc()).limit(limit).all()
-        return TransactionService._attach_transfer_pair_accounts(db, results)
+        query = TransactionService._apply_column_filters(query, filter_model)
+        total = query.count()
+        sort_column = _REVIEW_SORTABLE_COLUMNS.get(sort_by, Transaction.category_confidence)
+        order = sort_column.desc() if sort_dir == "desc" else sort_column.asc()
+        results = query.order_by(order).limit(limit).offset(offset).all()
+        return TransactionService._attach_transfer_pair_accounts(db, results), total
     
     @staticmethod
     def update_transaction_category(db: Session, transaction_id: str, category: str) -> Transaction:
@@ -248,8 +409,12 @@ class TransactionService:
         if not transaction:
             raise ValueError(f"Transaction {transaction_id} not found")
 
-        if CategoryService.requires_transfer_account(db, category) and not transaction.transfer_match_id:
-            raise TransferAccountRequiredError(category)
+        # A transfer-type category (e.g. "topup") can be finalized even
+        # without a matched pairing yet - many real transfers (e.g. a card
+        # top-up funded from outside the tracked accounts) never get a
+        # counterpart transaction at all. The frontend still flags these
+        # visually so the user knows is_transfer (and analytics exclusion)
+        # won't kick in until/unless a pairing exists.
 
         # Record training data
         if transaction.category_predicted != category:
@@ -257,6 +422,8 @@ class TransactionService:
                 transaction_id=transaction_id,
                 description=transaction.description,
                 amount=transaction.amount,
+                transaction_date=transaction.date,
+                merchant_key=_merchant_key(transaction.description),
                 original_label=transaction.category_predicted or "unknown",
                 corrected_label=category
             )
@@ -273,23 +440,30 @@ class TransactionService:
     @staticmethod
     def set_transfer_pair(db: Session, transaction_id: str, account_id: str = None) -> Transaction:
         """Manually set (or clear) which account a transaction is paired
-        with as a transfer - detect_and_flag_transfers' matching is greedy
-        and can pick the wrong candidate when several same-amount
-        transactions exist in the window, so the user can correct it here.
-        account_id=None clears any existing pairing on both sides."""
+        with as a transfer. Tries to find a real matching counterpart
+        transaction first (opposite sign, ~equal magnitude, within the day
+        window) and links the two - this is what corrects
+        detect_and_flag_transfers' greedy auto-matching when it picks the
+        wrong same-amount candidate. If no such counterpart exists (e.g. a
+        card top-up funded from outside the tracked accounts), falls back to
+        a one-sided pairing on transfer_account_id - just records which
+        account this is a transfer to/from, with no transaction to link on
+        the other side. account_id=None clears either kind of pairing."""
         transaction = db.query(Transaction).filter(Transaction.id == transaction_id).first()
         if not transaction:
             raise TransactionNotFoundError(transaction_id)
 
-        # Unlink any existing pair first, regardless of whether we're about
-        # to set a new one - covers re-pairing to a different account too.
+        # Unlink any existing matched pair first, regardless of whether
+        # we're about to set a new one - covers re-pairing to a different
+        # account too.
         if transaction.transfer_match_id:
             old_pair = db.query(Transaction).filter(Transaction.id == transaction.transfer_match_id).first()
             if old_pair and old_pair.transfer_match_id == transaction.id:
                 old_pair.is_transfer = False
                 old_pair.transfer_match_id = None
-            transaction.is_transfer = False
             transaction.transfer_match_id = None
+        transaction.is_transfer = False
+        transaction.transfer_account_id = None
 
         if account_id is None:
             db.commit()
@@ -317,13 +491,15 @@ class TransactionService:
             if best is None or day_diff < best_day_diff:
                 best, best_day_diff = candidate, day_diff
 
-        if not best:
-            raise NoMatchingTransferError(account_id)
-
         transaction.is_transfer = True
-        transaction.transfer_match_id = best.id
-        best.is_transfer = True
-        best.transfer_match_id = transaction.id
+        if best:
+            transaction.transfer_match_id = best.id
+            best.is_transfer = True
+            best.transfer_match_id = transaction.id
+        else:
+            # One-sided: no matching transaction to link, but the user still
+            # knows which account it involves.
+            transaction.transfer_account_id = account.id
 
         db.commit()
         db.refresh(transaction)
@@ -331,11 +507,11 @@ class TransactionService:
 
     @staticmethod
     def _attach_transfer_pair_accounts(db: Session, transactions: list) -> list:
-        """Attach a transient transfer_match_account_id attribute (the
-        account_id of the transaction on the other side of transfer_match_id)
-        to each transaction, in one batched query instead of one per row -
-        lets the Review page show/edit a transfer's paired account without
-        an extra fetch per transaction."""
+        """Attach a transient transfer_match_account_id attribute - the
+        account_id to show/edit in the Transfer column, sourced from either
+        a matched counterpart transaction's account (transfer_match_id) or
+        a one-sided pairing (transfer_account_id) - in one batched query
+        instead of one per row."""
         match_ids = {t.transfer_match_id for t in transactions if t.transfer_match_id}
         account_by_id = {}
         if match_ids:
@@ -343,7 +519,10 @@ class TransactionService:
                 db.query(Transaction.id, Transaction.account_id).filter(Transaction.id.in_(match_ids)).all()
             )
         for t in transactions:
-            t.transfer_match_account_id = account_by_id.get(t.transfer_match_id) if t.transfer_match_id else None
+            if t.transfer_match_id:
+                t.transfer_match_account_id = account_by_id.get(t.transfer_match_id)
+            else:
+                t.transfer_match_account_id = t.transfer_account_id
         return transactions
 
     @staticmethod
