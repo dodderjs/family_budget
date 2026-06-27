@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
+from app.config import settings
 from app.models.transaction import Transaction, TrainingData, Account, Card
 from app.models.schemas import TransactionCreate, TransactionResponse
 from app.services.account_service import AccountNotFoundError
@@ -159,6 +160,62 @@ def _build_filter_condition(column, model: dict):
 
 
 class TransactionService:
+    @staticmethod
+    def _should_auto_retrain(finalized_count: int) -> bool:
+        threshold = settings.ML_AUTO_RETRAIN_FINALIZED_THRESHOLD
+        step = max(1, settings.ML_AUTO_RETRAIN_FINALIZED_STEP)
+        return finalized_count >= threshold and (finalized_count - threshold) % step == 0
+
+    @staticmethod
+    def _build_retrain_samples(db: Session) -> list[tuple[str, str, float, str]]:
+        training_data = db.query(TrainingData).all()
+        data = []
+        for td in training_data:
+            description = td.description
+            amount = td.amount
+            date = td.transaction_date
+            if not description and td.transaction_id:
+                transaction = db.query(Transaction).filter(
+                    Transaction.id == td.transaction_id
+                ).first()
+                description = transaction.description if transaction else None
+                amount = transaction.amount if transaction else None
+                date = transaction.date if transaction else None
+            if description:
+                data.append((description, td.corrected_label, amount, date))
+        return data
+
+    @staticmethod
+    def _auto_retrain_and_repredict_if_needed(db: Session) -> None:
+        finalized_count = db.query(func.count(Transaction.id)).filter(
+            Transaction.category_final.isnot(None)
+        ).scalar() or 0
+        if not TransactionService._should_auto_retrain(finalized_count):
+            return
+
+        samples = TransactionService._build_retrain_samples(db)
+        if not samples:
+            return
+
+        predictor.retrain(db, samples)
+
+        candidates = db.query(Transaction).filter(
+            Transaction.category_final.is_(None),
+            Transaction.category_confidence < 1.0,
+        ).all()
+        if not candidates:
+            return
+
+        account_types = {a.id: a.type for a in db.query(Account).all()}
+        for txn in candidates:
+            category, confidence = predictor.predict(
+                db, txn.description, txn.amount, account_types.get(txn.account_id), txn.date
+            )
+            txn.category_predicted = category
+            txn.category_confidence = confidence
+
+        db.commit()
+
     @staticmethod
     def create_transaction(db: Session, transaction_data: dict) -> Transaction:
         """Create a new transaction with ML prediction"""
@@ -416,6 +473,8 @@ class TransactionService:
         # visually so the user knows is_transfer (and analytics exclusion)
         # won't kick in until/unless a pairing exists.
 
+        was_unfinalized = transaction.category_final is None
+
         # Record training data
         if transaction.category_predicted != category:
             training = TrainingData(
@@ -433,6 +492,13 @@ class TransactionService:
         transaction.updated_at = datetime.utcnow()
 
         db.commit()
+
+        if was_unfinalized:
+            try:
+                TransactionService._auto_retrain_and_repredict_if_needed(db)
+            except Exception:
+                db.rollback()
+
         db.refresh(transaction)
 
         return transaction

@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
 from app.db.database import engine, Base, SessionLocal, wait_for_db
 from app.api.transactions import router as transaction_router
 from app.services.category_service import CategoryService
@@ -14,12 +15,7 @@ app = FastAPI(
 # Add CORS middleware FIRST, before routers
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",  # React dev server
-        "http://localhost:3000",  # Alternative frontend port
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,5 +1,4 @@
 import joblib
-import os
 import re
 import unicodedata
 from datetime import datetime
@@ -7,34 +6,22 @@ from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 import numpy as np
-from pathlib import Path
 from typing import Optional
 from sqlalchemy.orm import Session
+from app.config import settings
+from app.constants.seed_data import KNOWN_MERCHANT_CATEGORIES, SEED_DATA
 from app.models.transaction import TrainingData
 from app.services.category_service import CategoryService
 
-MODEL_DIR = Path(__file__).parent.parent / "ml" / "models"
-MODEL_DIR.mkdir(exist_ok=True)
+MODEL_DIR = settings.ML_MODEL_DIR
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+try:
+    from app.constants.user_seed import USER_SEED_DATA
+except ImportError:
+    USER_SEED_DATA = []
 
-# High-precision deterministic overrides, checked before the ML model -
-# unambiguous brand/keyword matches that should never depend on a small
-# model's fuzzy text similarity. Keys are whole-word matches (regex \b on
-# both sides) against the lowercased description, derived from real merchant
-# strings across the example/ exports - not guessed. Keywords with a known
-# collision against an unrelated common word are deliberately left out (e.g.
-# bare "bolt" also means "shop" in Hungarian - "Mezőgazdasági Bolt" isn't the
-# Bolt ride-hailing app - so "bolt.eu" is used instead).
-KNOWN_MERCHANT_CATEGORIES = {
-    "groceries": ["lidl", "tesco", "aldi", "auchan", "spar", "cba", "penny"],
-    "health": ["patika", "gyogyszertar", "gyógyszertár", "rossmann"],
-    "eating_out": ["etterem", "étterem", "pizza", "burger", "cafe", "kavezo", "kávézó", "bisztro"],
-    "entertainment": ["cinema", "netflix", "hbo", "spotify"],
-    "travel": ["hotel", "booking.com", "wizz air", "wizzair", "ryanair"],
-    "transport": ["mol", "shell", "omv", "bkk", "mav", "taxi", "bolt.eu"],
-    "bills": ["mvm", "nkm", "dmrv", "telekom"],
-    "shopping": ["alza", "amazon", "aliexpress", "decathlon", "ikea", "obi", "c&a"],
-}
+ALL_SEED_DATA = [*SEED_DATA, *USER_SEED_DATA]
 
 
 def _match_known_merchant(text: str) -> Optional[str]:
@@ -106,141 +93,11 @@ def _category_allowed(db: Session, category: str, amount: float, account_type: s
     return True
 
 
-# Always included when (re)training, so the model never loses categories the
-# user hasn't happened to correct yet, and never ends up with fewer than 2
-# classes (which LogisticRegression.fit() can't handle). (text, label, amount)
-# - amount is a representative magnitude (HUF, signed per CATEGORY_SIGN) so
-# the model also learns that category from typical transaction size, not
-# just text. Seeds carry no date: the temporal day-of-month/day-of-week
-# features (see _temporal_features) are learned purely from real user
-# corrections. A hand-picked representative day per seed was tried and removed
-# - with a single example per recurring category the linear model treats that
-# day as a hard separator and then misclassifies the same category on any
-# other day (or with no date), so seeds feed a neutral (zero) temporal signal
-# and the feature only starts discriminating once enough genuinely-dated
-# corrections accumulate. Real Hungarian merchant names are pulled from
-# example/ exports (the same evidence KNOWN_MERCHANT_CATEGORIES above is
-# grounded in) so the model has real vocabulary to fall back on for near-misses
-# the deterministic lookup doesn't catch (different store number, city, branch
-# suffix, etc.) rather than only the original English placeholder phrases.
-SEED_DATA = [
-    ("Grocery Store", "groceries", -3500.0),
-    ("Supermarket", "groceries", -3500.0),
-    ("Whole Foods", "groceries", -3500.0),
-    ("Lidl", "groceries", -3500.0),
-    ("Tesco", "groceries", -3500.0),
-    ("Aldi", "groceries", -3500.0),
-    ("Auchan Budaors", "groceries", -3500.0),
-    ("Spar Magyarorszag", "groceries", -3500.0),
-    ("Cba Elelmiszer", "groceries", -3500.0),
-    ("Penny Market", "groceries", -3500.0),
-    ("Monthly Rent Payment", "rent", -150000.0),
-    ("Rent Deposit", "rent", -150000.0),
-    ("Landlord Payment", "rent", -150000.0),
-    ("Lakber", "rent", -150000.0),
-    ("Berleti dij", "rent", -150000.0),
-    ("Lakber Fizetes", "rent", -150000.0),
-    ("Alberlet Dij", "rent", -150000.0),
-    ("Salary Deposit", "salary", 350000.0),
-    ("Paycheck", "salary", 350000.0),
-    ("Income Deposit", "salary", 350000.0),
-    ("Munkaber", "salary", 350000.0),
-    ("Fizetes", "salary", 350000.0),
-    ("Electric Company", "bills", -15000.0),
-    ("Water Bill", "bills", -15000.0),
-    ("Internet Service", "bills", -15000.0),
-    ("Mvm Next Energiak", "bills", -15000.0),
-    ("Nkm Energia Zrt", "bills", -15000.0),
-    ("Dmrv Zrt", "bills", -15000.0),
-    ("Telekomszaml", "bills", -15000.0),
-    ("Uber", "transport", -2000.0),
-    ("Taxi", "transport", -2000.0),
-    ("Metro Card", "transport", -2000.0),
-    ("Gas Station", "transport", -2000.0),
-    ("Mol", "transport", -2000.0),
-    ("Shell", "transport", -2000.0),
-    ("Omv", "transport", -2000.0),
-    ("Bkk Automata", "transport", -2000.0),
-    ("Mav", "transport", -2000.0),
-    ("Cinema", "entertainment", -6000.0),
-    ("Movie Theater", "entertainment", -6000.0),
-    ("Concert", "entertainment", -6000.0),
-    ("Cinema City", "entertainment", -6000.0),
-    ("Netflix", "entertainment", -6000.0),
-    ("Hbo Max", "entertainment", -6000.0),
-    ("Spotify", "entertainment", -6000.0),
-    ("Clothing Store", "shopping", -8000.0),
-    ("Department Store", "shopping", -8000.0),
-    ("Online Shopping", "shopping", -8000.0),
-    ("Shopping Mall", "shopping", -8000.0),
-    ("C&A", "shopping", -8000.0),
-    ("Alza", "shopping", -8000.0),
-    ("Amazon", "shopping", -8000.0),
-    ("Aliexpress", "shopping", -8000.0),
-    ("Decathlon", "shopping", -8000.0),
-    ("Ikea", "shopping", -8000.0),
-    ("Obi", "shopping", -8000.0),
-    ("Restaurant", "eating_out", -4000.0),
-    ("Cafe", "eating_out", -4000.0),
-    ("Coffee Shop", "eating_out", -4000.0),
-    ("Food Delivery", "eating_out", -4000.0),
-    ("Burger King", "eating_out", -4000.0),
-    ("Bettolino Pizza", "eating_out", -4000.0),
-    ("Cafe Rabacal", "eating_out", -4000.0),
-    ("Hotel Booking", "travel", -40000.0),
-    ("Airline Ticket", "travel", -40000.0),
-    ("Flight Booking", "travel", -40000.0),
-    ("Travel Agency", "travel", -40000.0),
-    ("Booking.com", "travel", -40000.0),
-    ("Wizz Air", "travel", -40000.0),
-    ("Ryanair", "travel", -40000.0),
-    ("Pharmacy", "health", -5000.0),
-    ("Doctor Visit", "health", -5000.0),
-    ("Hospital", "health", -5000.0),
-    ("Health Insurance", "health", -5000.0),
-    ("Rossmann", "health", -5000.0),
-    ("Danubius Patika", "health", -5000.0),
-    ("Revolut Top-Up", "topup", -20000.0),
-    ("Revolut Feltoltes", "topup", -20000.0),
-    ("Top-Up Card", "topup", -20000.0),
-    ("Credit Card Payment", "credit_payback", -50000.0),
-    ("Credit Payback", "credit_payback", -50000.0),
-    ("Hitelkartya Torlesztes", "credit_payback", -50000.0),
-    ("Transfer To Savings", "saving", -100000.0),
-    ("Savings Deposit", "saving", -100000.0),
-    ("Megtakaritasi Atutalas", "saving", -100000.0),
-    ("Bank Transfer", "transfer", -50000.0),
-    ("Internal Transfer", "transfer", -50000.0),
-    ("Atutalas Bankon Belul", "transfer", -50000.0),
-    ("Consulting Fee", "business_services", -25000.0),
-    ("Business Service", "business_services", -25000.0),
-    ("Accounting Fee", "business_services", -25000.0),
-    ("Miscellaneous Expense", "general", -3000.0),
-    ("General Purchase", "general", -3000.0),
-    ("Bank Statement Fee", "general_finance", -2000.0),
-    ("Financial Service Charge", "general_finance", -2000.0),
-    # MBH/K&H's "Megbízás típusa"/"típus" transaction-type text is the
-    # category signal itself for these rows (see MBH_CATEGORY_MAP/
-    # KH_CATEGORY_MAP in format_service.py) - real raw values used as seed
-    # phrases so the model recognizes them even on formats without that
-    # deterministic mapping.
-    ("Forgalmi jutalek", "bank_fees", -500.0),
-    ("Eves kartyadij", "bank_fees", -3000.0),
-    ("Szamlavezetes havi koltsege", "bank_fees", -1000.0),
-    ("Kamat", "interest", 50.0),
-    ("Hitel toke alapkamata", "loan_interest", -20000.0),
-    ("Toketorlesztes", "loan_principal", -80000.0),
-    ("Hitel torlesztes", "loan_principal", -80000.0),
-    ("Atm felvet", "cash_withdrawal", -20000.0),
-    ("Keszpenzfelvet K&H atmbol", "cash_withdrawal", -20000.0),
-]
-
-
 # Caps the log1p(abs(amount)) feature at roughly log1p(3_000_000), so it sits
 # in a comparable [0, ~1] range to TF-IDF's normalized weights instead of
 # dwarfing them - a plain unscaled HUF amount would otherwise swamp the text
 # signal in the logistic regression.
-_AMOUNT_LOG_SCALE = 15.0
+_AMOUNT_LOG_SCALE = settings.ML_AMOUNT_LOG_SCALE
 
 
 def _scaled_amount(amount: float) -> float:
@@ -254,7 +111,7 @@ def _scaled_amount(amount: float) -> float:
 # wrong "tiny purchase" signal instead of a neutral one. The mean of the seed
 # set's own scaled amounts is a self-consistent neutral midpoint instead of a
 # hand-picked constant that would drift out of sync if SEED_DATA changes.
-_NEUTRAL_AMOUNT_FEATURE = sum(_scaled_amount(amt) for _, _, amt in SEED_DATA) / len(SEED_DATA)
+_NEUTRAL_AMOUNT_FEATURE = sum(_scaled_amount(amt) for _, _, amt in ALL_SEED_DATA) / len(ALL_SEED_DATA)
 
 
 def _amount_feature(amount: float = None) -> float:
@@ -332,9 +189,9 @@ class CategoryPredictor:
     def _create_baseline(self, db: Session):
         """Create baseline model with seed data. Seeds carry no date, so their
         temporal features are left neutral (see _fit's None defaults)."""
-        texts = [desc for desc, _, _ in SEED_DATA]
-        labels = [cat for _, cat, _ in SEED_DATA]
-        amounts = [amt for _, _, amt in SEED_DATA]
+        texts = [desc for desc, _, _ in ALL_SEED_DATA]
+        labels = [cat for _, cat, _ in ALL_SEED_DATA]
+        amounts = [amt for _, _, amt in ALL_SEED_DATA]
         self._fit(db, texts, labels, amounts)
 
     def _dense_features(self, amounts, days_of_month=None, days_of_week=None):
@@ -494,12 +351,12 @@ class CategoryPredictor:
         # lists rather than concatenating mismatched-width tuples. Seeds get a
         # neutral (None) temporal signal; the temporal features are learned from
         # the dated corrections only.
-        texts = [desc for desc, _, _ in SEED_DATA] + [desc for desc, _, _, _ in training_data]
-        labels = [cat for _, cat, _ in SEED_DATA] + [cat for _, cat, _, _ in training_data]
-        amounts = [amt for _, _, amt in SEED_DATA] + [amt for _, _, amt, _ in training_data]
+        texts = [desc for desc, _, _ in ALL_SEED_DATA] + [desc for desc, _, _, _ in training_data]
+        labels = [cat for _, cat, _ in ALL_SEED_DATA] + [cat for _, cat, _, _ in training_data]
+        amounts = [amt for _, _, amt in ALL_SEED_DATA] + [amt for _, _, amt, _ in training_data]
 
-        days_of_month = [None] * len(SEED_DATA)
-        days_of_week = [None] * len(SEED_DATA)
+        days_of_month = [None] * len(ALL_SEED_DATA)
+        days_of_week = [None] * len(ALL_SEED_DATA)
         for _, _, _, date in training_data:
             dom, dow = _parse_date_parts(date)
             days_of_month.append(dom)

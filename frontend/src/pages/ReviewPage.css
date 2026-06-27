@@ -1,0 +1,13 @@
+.ag-cell-has-different-currency:after {
+    border-style: solid;
+    content: "";
+    pointer-events: none;
+    position: absolute;
+    top: 0;
+}
+:where(.ag-ltr) .ag-cell-has-different-currency:after {
+    border-color: transparent var(--ag-note-indicator-color) transparent transparent;
+    border-width: 0 var(--ag-note-indicator-size) var(--ag-note-indicator-size) 0;
+    right: 0;
+}
+

@@ -12,6 +12,7 @@ import { accountIdParam, resolveDateRange, useTransactionStore } from '../store/
 import { formatCurrency } from '../utils/currency';
 
 import { colorSchemeDarkBlue, themeMaterial } from 'ag-grid-community';
+import './ReviewPage.css';
 // No legacy ag-grid CSS imports here on purpose - the new Theming API
 // (the `theme` object below) and the old CSS-class-based themes
 // (ag-theme-quartz etc.) fight each other if both are loaded: the legacy
@@ -324,7 +325,7 @@ export const ReviewPage: React.FC = () => {
       // filter here would be a confusing duplicate, and the cell shows the name
       // while the value is the id.
       filter: false,
-      valueGetter: (params: any) => accountNameById[params.data.account_id] || params.data.account_id,
+      valueGetter: (params: any) => accountNameById[params.data.account_id] || params.data.account_id
     } as ColDef<any>] : []),
     {
       // The actual editable value is the paired account id, not is_transfer (a
@@ -391,7 +392,16 @@ export const ReviewPage: React.FC = () => {
       headerName: 'Amount',
       width: 110,
       filter: 'agNumberColumnFilter',
-      valueFormatter: (params) => formatCurrency(params.value || 0)
+      valueFormatter: (params) => formatCurrency(params.value || 0),
+      type: 'numericColumn',
+      cellClass: params => {
+          return params.data.original_amount ? 'ag-cell-has-different-currency' : undefined;
+      },
+      cellRenderer: (params: any) => (
+        <span title={params.data.original_amount ? `${params.data.original_amount} ${params.data.currency}` : undefined} >
+          {params.valueFormatted || ''}
+        </span>
+      )
     },
     {
       field: 'description',
