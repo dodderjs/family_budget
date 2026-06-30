@@ -5,6 +5,10 @@
     position: absolute;
     top: 0;
 }
+
+.row-category-conflict .ag-cell {
+    background: rgba(255, 212, 59, 0.14);
+}
 :where(.ag-ltr) .ag-cell-has-different-currency:after {
     border-color: transparent var(--ag-note-indicator-color) transparent transparent;
     border-width: 0 var(--ag-note-indicator-size) var(--ag-note-indicator-size) 0;

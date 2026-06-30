@@ -1,6 +1,7 @@
 import { Alert, Badge, Button, Card, Container, FileInput, Group, Modal, PasswordInput, ScrollArea, Select, SimpleGrid, Stack, Table, Tabs, TagsInput, Text, TextInput, Title } from '@mantine/core';
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { accountFormService } from '../services/accountFormService';
 import { csvService } from '../services/csvService';
 import { Account, CsvRow, transactionService } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
@@ -13,24 +14,6 @@ const getFieldValue = (row: Record<string, any> | undefined, field: string | nul
   const target = field.trim().toLowerCase();
   const key = Object.keys(row).find((k) => k.trim().toLowerCase() === target);
   return key ? String(row[key] ?? '').trim() : '';
-};
-
-const onlyDigits = (value: string) => value.replace(/\D/g, '');
-
-const findMatchingAccount = (accounts: Account[], detectedNumber: string): Account | undefined => {
-  if (!detectedNumber) return undefined;
-  const detectedDigits = onlyDigits(detectedNumber);
-  const suffixMatches = (registered: string) =>
-    detectedDigits.length >= 4 && onlyDigits(registered).endsWith(detectedDigits);
-
-  return accounts.find((acc) => {
-    if (acc.account_number.trim() === detectedNumber) return true;
-    // Curve only gives us the card's last 4 digits - match against a masked
-    // or full account number that ends with the same digits, or against any
-    // card registered to the account (a card can be replaced over time).
-    if (suffixMatches(acc.account_number)) return true;
-    return acc.cards.some((c) => suffixMatches(c.card_number));
-  });
 };
 
 type QueuedFileStatus = 'detecting' | 'ready' | 'needs-account' | 'processing' | 'done' | 'error';
@@ -85,29 +68,10 @@ export const UploadPage: React.FC = () => {
     setQueue((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
   };
 
-  // Validate account number format (at least 4 digits or masked format like ****1234)
   const validateAccountNumber = (value: string): boolean => {
-    const trimmed = value.trim();
-    // Allow formats like: 1234567890, ****1234, XX...1234, or at least 4 characters
-    if (trimmed.length < 4) {
-      setAccountNumberError('Account number must be at least 4 characters');
-      return false;
-    }
-    if (!/^[A-Za-z0-9*\-.]{4,}$/.test(trimmed)) {
-      setAccountNumberError('Account number can only contain letters, numbers, *, -, and periods');
-      return false;
-    }
-    setAccountNumberError('');
-    return true;
-  };
-
-  // Check if account form is valid (without calling setState)
-  const isAccountFormValid = (): boolean => {
-    if (!newAccountName.trim()) return false;
-    const trimmed = newAccountNumber.trim();
-    if (trimmed.length < 4) return false;
-    if (!/^[A-Za-z0-9*\-.]{4,}$/.test(trimmed)) return false;
-    return true;
+    const result = accountFormService.validateAccountNumber(value);
+    setAccountNumberError(result.error);
+    return result.valid;
   };
 
   const openAddAccountDialog = (suggestedName: string, suggestedNumber: string) => {
@@ -138,19 +102,6 @@ export const UploadPage: React.FC = () => {
     setDecidingFileId(null);
   };
 
-  const syncCards = async (accountId: string, existingCards: { id: string; card_number: string }[], desiredNumbers: string[]) => {
-    const existingNumbers = new Set(existingCards.map((c) => c.card_number));
-    const desiredSet = new Set(desiredNumbers.map((n) => n.trim()).filter(Boolean));
-
-    const toAdd = [...desiredSet].filter((n) => !existingNumbers.has(n));
-    const toRemove = existingCards.filter((c) => !desiredSet.has(c.card_number));
-
-    await Promise.all([
-      ...toAdd.map((n) => transactionService.addCard(accountId, n)),
-      ...toRemove.map((c) => transactionService.removeCard(accountId, c.id)),
-    ]);
-  };
-
   const handleDeleteAccount = async (acc: Account, force = false) => {
     try {
       await transactionService.deleteAccount(acc.id, force);
@@ -176,7 +127,7 @@ export const UploadPage: React.FC = () => {
     setQueue((prev) =>
       prev.map((f) => {
         if (f.status !== 'needs-account' || !f.detectedNumber) return f;
-        const match = findMatchingAccount(allAccounts, f.detectedNumber);
+        const match = accountFormService.findMatchingAccount(allAccounts, f.detectedNumber);
         return match ? { ...f, status: 'ready', accountId: match.id } : f;
       })
     );
@@ -189,7 +140,7 @@ export const UploadPage: React.FC = () => {
       const mapping = response.data.suggested_mapping;
       const detectedFormat = response.data.detected_format;
       const detectedNumber = getFieldValue(parsedRows[0], mapping?.accountNumberField);
-      const matchedAccount = findMatchingAccount(useTransactionStore.getState().accounts, detectedNumber);
+      const matchedAccount = accountFormService.findMatchingAccount(useTransactionStore.getState().accounts, detectedNumber);
 
       updateQueueItem(id, {
         rows: parsedRows,
@@ -298,7 +249,7 @@ export const UploadPage: React.FC = () => {
           type: newAccountType.trim() || null,
         });
         const existingCards = accounts.find((a) => a.id === editingAccountId)?.cards || [];
-        await syncCards(editingAccountId, existingCards, cardNumbers);
+        await accountFormService.syncCards(editingAccountId, existingCards, cardNumbers);
         setMessage({ type: 'success', text: `Account "${response.data.name}" updated` });
         setShowAddAccountModal(false);
         await loadAccounts();
@@ -308,7 +259,7 @@ export const UploadPage: React.FC = () => {
           newAccountNumber,
           newAccountType.trim() || undefined
         );
-        await syncCards(response.data.id, [], cardNumbers);
+        await accountFormService.syncCards(response.data.id, [], cardNumbers);
         setMessage({ type: 'success', text: `Account "${response.data.name}" created` });
         setShowAddAccountModal(false);
         await loadAccounts();
@@ -429,7 +380,7 @@ export const UploadPage: React.FC = () => {
               <Button
                 onClick={handleSaveAccount}
                 loading={creatingAccount}
-                disabled={!useExistingAccountId && !isAccountFormValid()}
+                disabled={!useExistingAccountId && !accountFormService.isAccountFormValid(newAccountName, newAccountNumber)}
               >
                 {editingAccountId ? 'Save Changes' : useExistingAccountId ? 'Use This Account' : 'Create Account'}
               </Button>

@@ -8,6 +8,7 @@ export interface Transaction {
   currency: string;
   description: string;
   merchant: string | null;
+  type: string | null;
   hash_fingerprint: string;
   category_predicted: string | null;
   category_confidence: number | null;
@@ -87,6 +88,12 @@ export interface MonthlyTrendEntry {
 }
 
 export type MonthlyTrends = Record<string, MonthlyTrendEntry>;
+
+export interface RetrainModelResponse {
+  status: string;
+  trained_samples_total: number;
+  trained_samples_selected: number;
+}
 
 export type BreakdownGroupBy = 'category' | 'merchant' | 'account';
 
@@ -195,8 +202,8 @@ export const transactionService = {
   getMonthlyTrends: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
     api.get<MonthlyTrends>('/analytics/trends', { params: { account_id, date_from, date_to } }),
 
-  retrainModel: () =>
-    api.post('/ml/retrain'),
+  retrainModel: (trained_samples_selected = 0) =>
+    api.post<RetrainModelResponse>('/ml/retrain', null, { params: { trained_samples_selected } }),
 
   getAccountCoverage: (accountId: string) =>
     api.get<AccountCoverage>(`/accounts/${accountId}/coverage`),

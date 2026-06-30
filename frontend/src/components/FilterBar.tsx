@@ -1,6 +1,7 @@
 import { Button, Group, MultiSelect, Select, TextInput } from '@mantine/core';
 import React from 'react';
-import { DATE_RANGE_PRESETS, DateRangePreset, useTransactionStore } from '../store/transactionStore';
+import { useTransactionStore } from '../store/transactionStore';
+import { DATE_RANGE_PRESETS, DateRangePreset } from '../utils/dateRange';
 
 interface FilterBarProps {
   /** Hide the account selector when a page manages account selection itself (e.g. Upload). */

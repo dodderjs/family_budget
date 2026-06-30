@@ -7,9 +7,13 @@ import { AgGridReact } from 'ag-grid-react';
 
 import { CategoryPicker } from '../components/CategoryPicker';
 import { FilterBar } from '../components/FilterBar';
+import { LinkedTransactionDetail } from '../components/review/LinkedTransactionDetail';
+import { reviewService } from '../services/reviewService';
 import { Transaction, transactionService } from '../services/transactionService';
-import { accountIdParam, resolveDateRange, useTransactionStore } from '../store/transactionStore';
+import { useTransactionStore } from '../store/transactionStore';
+import { downloadCsvFile } from '../utils/csvExport';
 import { formatCurrency } from '../utils/currency';
+import { accountIdParam, resolveDateRange } from '../utils/dateRange';
 
 import { colorSchemeDarkBlue, themeMaterial } from 'ag-grid-community';
 import './ReviewPage.css';
@@ -43,51 +47,20 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 
 const downloadCsv = (transactions: Transaction[]) => {
-  const headers = ['date', 'amount', 'description', 'merchant', 'category_predicted', 'category_final'];
-  const rows = transactions.map((t) =>
-    headers.map((h) => `"${String((t as any)[h] ?? '').replace(/"/g, '""')}"`).join(',')
-  );
-  const csv = [headers.join(','), ...rows].join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `review-export-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(url);
-};
-
-// Native master/detail renderer for a row whose purchase is also reported via a
-// linked Curve/bank-account transaction. The linked side isn't necessarily in
-// the loaded block (e.g. it's already finalized and "show finalized" is off), so
-// it's fetched on expand by its id rather than read from the grid.
-const LinkedTransactionDetail: React.FC<any> = (params) => {
-  const data = params.data as Transaction;
-  const [linked, setLinked] = useState<Transaction | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    if (!data.duplicate_of_id) return;
-    transactionService
-      .getTransaction(data.duplicate_of_id)
-      .then((res) => active && setLinked(res.data))
-      .catch(() => active && setFailed(true));
-    return () => {
-      active = false;
-    };
-  }, [data.duplicate_of_id]);
-
-  if (failed) return <Text size="xs" c="red" p="sm">Failed to load linked transaction</Text>;
-  if (!linked) return <Text size="xs" c="dimmed" p="sm">Loading linked transaction…</Text>;
-  return (
-    <Group gap="md" wrap="nowrap" p="sm">
-      <Badge color="grape" variant="light">Linked Curve transaction</Badge>
-      <Text size="sm">{linked.date}</Text>
-      <Text size="sm">{formatCurrency(linked.amount)}</Text>
-      <Text size="sm" style={{ flex: 1 }}>{linked.description}</Text>
-      <Text size="sm" c="dimmed">{linked.merchant || ''}</Text>
-    </Group>
+  const headers = ['date', 'amount', 'description', 'merchant', 'type', 'category_predicted', 'category_final'];
+  const rows = transactions.map((t) => [
+    t.date,
+    t.amount,
+    t.description,
+    t.merchant,
+    t.type,
+    t.category_predicted,
+    t.category_final,
+  ]);
+  downloadCsvFile(
+    `review-export-${new Date().toISOString().slice(0, 10)}.csv`,
+    headers,
+    rows
   );
 };
 
@@ -95,7 +68,12 @@ export const ReviewPage: React.FC = () => {
   const [includeFinalized, setIncludeFinalized] = useState(false);
   const [selectedCount, setSelectedCount] = useState(0);
   const [bulkConfirming, setBulkConfirming] = useState(false);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [lastConfirmSummary, setLastConfirmSummary] = useState<string | null>(null);
+  const [pairCategoryConflicts, setPairCategoryConflicts] = useState<Record<string, string>>({});
   const gridRef = useRef<AgGridReact>(null);
+  const pageSizeRef = useRef(DEFAULT_PAGE_SIZE);
+  pageSizeRef.current = pageSize;
 
   const selectedAccountIds = useTransactionStore((s) => s.selectedAccountIds);
   const accounts = useTransactionStore((s) => s.accounts);
@@ -139,7 +117,12 @@ export const ReviewPage: React.FC = () => {
       const q = queryRef.current;
       const sort = req.sortModel?.[0];
       const startRow = req.startRow ?? 0;
-      const endRow = req.endRow ?? startRow + DEFAULT_PAGE_SIZE;
+      // cacheBlockSize is read-only after grid init and stays at DEFAULT_PAGE_SIZE.
+      // req.endRow always equals startRow + cacheBlockSize (20), so using it as
+      // the limit ignores the user's selected page size entirely. Always derive
+      // the limit from the live pagination API instead.
+      const currentPageSize = gridRef.current?.api.paginationGetPageSize() ?? pageSizeRef.current;
+      const endRow = startRow + currentPageSize;
       try {
         const res = await transactionService.getReviewTransactions({
           limit: endRow - startRow,
@@ -219,17 +202,60 @@ export const ReviewPage: React.FC = () => {
     if (node?.data) node.setData({ ...node.data, ...patch });
   };
 
-  const handleCategoryUpdate = async (transactionId: string, category: string) => {
+  const markRowSelected = (transactionId: string) => {
+    const node = gridRef.current?.api.getRowNode(transactionId);
+    if (node) {
+      node.setSelected(true);
+    }
+  };
+
+  const clearPairConflict = (transactionIds: string[]) => {
+    setPairCategoryConflicts((prev) => {
+      const next = { ...prev };
+      for (const transactionId of transactionIds) {
+        delete next[transactionId];
+      }
+      return next;
+    });
+  };
+
+  const handleCategoryUpdate = async (row: Transaction, category: string, previousCategoryFinal?: string | null) => {
+    const currentCategoryFinal = previousCategoryFinal ?? row.category_final;
+    if (!category || category === currentCategoryFinal) return;
+    const pairId = row.transfer_match_id || row.duplicate_of_id;
+
     // No hard block on a missing transfer pairing - many real transfers (e.g. a
     // card top-up funded from outside the tracked accounts) never get a
     // counterpart transaction at all. The Transfer/Final Category cells still
     // render in red via requiresTransferAccount() so it stays visible, but it
     // no longer prevents saving the category.
     try {
-      await transactionService.updateTransaction(transactionId, category);
-      patchRow(transactionId, { category_final: category });
+      const result = await reviewService.updateCategoryWithPair(row, category);
+
+      patchRow(row.id, { category_final: result.updated.category_final ?? category });
+      markRowSelected(row.id);
+
+      if (result.pairUpdated) {
+        patchRow(result.pairUpdated.id, { category_final: result.pairUpdated.category_final ?? category });
+      }
+
+      clearPairConflict(pairId ? [row.id, pairId] : [row.id]);
+
+      if (result.conflict) {
+        const conflict = result.conflict;
+        const message = `Pair already has final category: ${result.conflict.pairCategoryFinal}`;
+        setPairCategoryConflicts((prev) => ({
+          ...prev,
+          [row.id]: message,
+          [conflict.pairId]: message,
+        }));
+      }
+
+      if (result.pairError) {
+        setError(`Category saved, but paired-row sync failed: ${result.pairError}`);
+      }
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to update transaction');
+      setError(err.message || 'Failed to update transaction');
     }
   };
 
@@ -239,19 +265,20 @@ export const ReviewPage: React.FC = () => {
   // missing transfer pairing no longer blocks confirmation.
   const handleConfirmSelected = async () => {
     const selected = (gridRef.current?.api.getSelectedRows() || []).map((row) => !row?.category_final ? { ...row, category_final: row.category_predicted } : row) as Transaction[];
-    const toConfirm = selected.filter((t) => t.category_final && t.category_predicted);
-
-    if (toConfirm.length === 0) return;
+    if (selected.length === 0) return;
 
     setBulkConfirming(true);
+    setLastConfirmSummary(null);
     try {
-      const results = await Promise.allSettled(
-        toConfirm.map((t) => transactionService.updateTransaction(t.id, t.category_predicted!))
+      const { succeeded, failed, retrained_samples_total, retrained_samples_selected } = await reviewService.confirmSelected(selected);
+      if (failed > 0) {
+        setError(`${failed} row(s) could not be confirmed.`);
+      } else {
+        setError(null);
+      }
+      setLastConfirmSummary(
+        `Confirmed ${retrained_samples_selected ?? succeeded} selected row(s). Model retrained on ${retrained_samples_total ?? 0} total sample(s).`
       );
-      const succeeded = results.filter((r) => r.status === 'fulfilled').length;
-      if (succeeded > 0) await transactionService.retrainModel();
-      const failed = toConfirm.length - succeeded;
-      if (failed > 0) setError(`${failed} row(s) could not be confirmed.`);
       gridRef.current?.api.deselectAll();
     } catch (err: any) {
       setError(err.message || 'Failed to confirm selected transactions');
@@ -263,10 +290,10 @@ export const ReviewPage: React.FC = () => {
 
   const handleTransferAccountChange = async (transactionId: string, accId: string | null) => {
     try {
-      const response = await transactionService.setTransferPair(transactionId, accId);
-      patchRow(transactionId, response.data);
+      const updated = await reviewService.updateTransferPair(transactionId, accId);
+      patchRow(transactionId, updated);
     } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to update transfer pairing');
+      setError(err.message || 'Failed to update transfer pairing');
     }
   };
 
@@ -393,9 +420,9 @@ export const ReviewPage: React.FC = () => {
       width: 110,
       filter: 'agNumberColumnFilter',
       valueFormatter: (params) => formatCurrency(params.value || 0),
-      type: 'numericColumn',
+      type: 'rightAligned',
       cellClass: params => {
-          return params.data.original_amount ? 'ag-cell-has-different-currency' : undefined;
+          return params.data.original_amount ? ['ag-cell-has-different-currency', 'ag-right-aligned-cell'] : ['ag-right-aligned-cell'];
       },
       cellRenderer: (params: any) => (
         <span title={params.data.original_amount ? `${params.data.original_amount} ${params.data.currency}` : undefined} >
@@ -448,6 +475,12 @@ export const ReviewPage: React.FC = () => {
       }
     },
     {
+      field: 'type',
+      headerName: 'Type',
+      width: 160,
+      filter: 'agTextColumnFilter',
+    },
+    {
       field: 'category_predicted',
       headerName: 'Predicted',
       width: 120,
@@ -490,8 +523,9 @@ export const ReviewPage: React.FC = () => {
       valueSetter: (params: any) => {
         const newValue = params.newValue;
         if (!newValue || newValue === params.data.category_final) return false;
+        const previousCategoryFinal = params.data.category_final;
         params.data.category_final = newValue;
-        handleCategoryUpdate(params.data.id, newValue);
+        handleCategoryUpdate(params.data as Transaction, newValue, previousCategoryFinal);
         return true;
       },
       cellRenderer: (params: any) => {
@@ -501,12 +535,21 @@ export const ReviewPage: React.FC = () => {
         const needsTransfer = requiresTransferAccount(prefill) && !params.data.transfer_match_account_id;
         return (
           <div style={CELL_CENTER_STYLE}>
-            <CategoryPicker
-              value={prefill}
-              onChange={(leafKey) => handleCategoryUpdate(params.data.id, leafKey)}
-              error={needsTransfer}
-              placeholder="Select category"
-            />
+            <Group gap={4} wrap="nowrap" align="center" style={{ width: '100%' }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <CategoryPicker
+                  value={prefill}
+                  onChange={(leafKey) => handleCategoryUpdate(params.data as Transaction, leafKey)}
+                  error={needsTransfer}
+                  placeholder="Select category"
+                />
+              </div>
+              {pairCategoryConflicts[params.data.id] && (
+                <Badge size="sm" color="yellow" variant="light" title={pairCategoryConflicts[params.data.id]}>
+                  !
+                </Badge>
+              )}
+            </Group>
           </div>
         );
       }
@@ -520,9 +563,9 @@ export const ReviewPage: React.FC = () => {
     // One DB-backed page per grid page; keep the block size aligned with the
     // page size so a page is exactly one block request.
     pagination: true,
-    paginationPageSize: DEFAULT_PAGE_SIZE,
+    paginationPageSize: pageSize,
     paginationPageSizeSelector: PAGE_SIZE_OPTIONS,
-    cacheBlockSize: DEFAULT_PAGE_SIZE,
+    cacheBlockSize: pageSize,
     masterDetail: true,
     isRowMaster: (data: any) => !!data?.duplicate_of_id,
     detailCellRenderer: LinkedTransactionDetail,
@@ -531,6 +574,7 @@ export const ReviewPage: React.FC = () => {
       filter: true,
       floatingFilter: true,
       sortable: true,
+      editable: false,
     },
     // Floor height so Select/CategoryPicker controls (taller than one line of
     // plain text) never get clipped - the Description column's autoHeight still
@@ -538,6 +582,12 @@ export const ReviewPage: React.FC = () => {
     rowHeight: 52,
     getRowId: (params: any) => params.data.id,
     onSelectionChanged: (e: any) => setSelectedCount(e.api.getSelectedRows().length),
+    onPaginationChanged: (e: any) => {
+      const newPageSize = e.api.paginationGetPageSize();
+      if (newPageSize !== pageSize) {
+        setPageSize(newPageSize);
+      }
+    },
     rowSelection: {
       mode: "multiRow" as const,
       checkboxes: true,
@@ -547,6 +597,7 @@ export const ReviewPage: React.FC = () => {
       headerCheckbox: false,
       enableClickSelection: false,
     },
+    getRowClass: (params: any) => (pairCategoryConflicts[params.data?.id] ? 'row-category-conflict' : ''),
     cellSelection: {
       handle: {
         mode: 'fill' as const,
@@ -598,6 +649,10 @@ export const ReviewPage: React.FC = () => {
             onChange={(e) => setIncludeFinalized(e.currentTarget.checked)}
           />
         </Group>
+
+        {lastConfirmSummary && (
+          <Text size="sm" c="dimmed">{lastConfirmSummary}</Text>
+        )}
 
         <div style={{ height: '600px', width: '100%' }}>
           <AgGridReact
