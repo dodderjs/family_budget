@@ -25,6 +25,14 @@ docker exec -it family-budget-api python scripts/reset_data.py --yes --keep-trai
 ```
 Always deletes all transactions and leaves accounts untouched. Separately asks whether to *also* delete learned corrections (training data) and revert the ML model to its bare seed baseline — default no, since the seed baseline has no real merchant vocabulary and answering yes means every re-imported transaction predicts close to randomly until you re-review everything. Only answer yes when testing categorization/ML logic itself, not when just re-importing the same data. Use this between manual test runs after a normalization/categorization/transfer-detection change instead of re-creating accounts by hand. This is a CLI script, not an API endpoint — see below.
 
+## Refresh description/merchant + retrain after mapping changes
+
+```bash
+docker exec -it family-budget-api python scripts/migrate_description_merchant_and_retrain.py
+docker exec -it family-budget-api python scripts/migrate_description_merchant_and_retrain.py --yes
+```
+Use this after changing `format_service` description/merchant field mappings: it re-normalizes stored transaction `description`/`merchant` from each row's `raw_source`, syncs `training_data` for finalized categories, and retrains the model from the updated corrections.
+
 ## Flow for fixing/improving things here
 
 Established this session, keep following it:
