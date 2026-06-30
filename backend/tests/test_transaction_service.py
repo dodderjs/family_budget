@@ -1,5 +1,6 @@
 import pytest
 
+from app.api.transactions import retrain_model
 from app.models.transaction import Account, Card, Transaction, TrainingData
 from app.services import currency_service
 from app.services.account_service import AccountNotFoundError
@@ -34,7 +35,7 @@ def mock_predictor(monkeypatch):
 
 def _txn_data(
     account_id, fingerprint="fp-1", description="Lidl", date="2024-01-05", merchant="Lidl",
-    category_hint=None, card_hint=None, amount=-100.0, account_type=None, currency="HUF",
+    category_hint=None, card_hint=None, amount=-100.0, account_type=None, currency="HUF", txn_type=None,
 ):
     return {
         "account_id": account_id,
@@ -47,6 +48,7 @@ def _txn_data(
         "hash_fingerprint": fingerprint,
         "category_hint": category_hint,
         "card_hint": card_hint,
+        "type": txn_type,
         "account_type": account_type,
     }
 
@@ -55,6 +57,13 @@ def test_create_transaction_persists_a_new_row(db_session, account):
     created = TransactionService.create_transaction(db_session, _txn_data(account.id))
     assert created.id is not None
     assert db_session.query(Transaction).count() == 1
+
+
+def test_create_transaction_persists_type(db_session, account):
+    created = TransactionService.create_transaction(
+        db_session, _txn_data(account.id, txn_type="Card Payment")
+    )
+    assert created.type == "Card Payment"
 
 
 def test_card_hint_column_fits_a_full_account_number(db_session, account):
@@ -153,35 +162,38 @@ def test_different_fingerprints_both_get_created(db_session, account):
     assert db_session.query(Transaction).count() == 2
 
 
-def test_category_hint_overrides_predicted_category_with_full_confidence(db_session, account):
+def test_category_hint_overrides_predicted_category_when_confidence_below_threshold(db_session, account, monkeypatch):
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.89)
+    )
     created = TransactionService.create_transaction(
         db_session, _txn_data(account.id, category_hint="utilities")
     )
     assert created.category_predicted == "utilities"
-    assert created.category_confidence == 1.0
+    assert created.category_confidence == 0.89
     assert created.category_final is None  # still goes through the normal review queue
 
 
-def test_category_hint_disagreeing_with_prediction_creates_training_data(db_session, account):
+def test_category_hint_does_not_override_predicted_category_when_confidence_at_threshold(db_session, account):
     created = TransactionService.create_transaction(
         db_session, _txn_data(account.id, category_hint="utilities")
     )
-    training = db_session.query(TrainingData).filter(TrainingData.transaction_id == created.id).first()
-    assert training is not None
-    assert training.original_label == "groceries"
-    assert training.corrected_label == "utilities"
+    assert created.category_predicted == "groceries"
+    assert created.category_confidence == 0.9
 
 
-def test_training_data_denormalizes_description_and_amount(db_session, account):
+def test_category_hint_does_not_create_training_data(db_session, account, monkeypatch):
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.89)
+    )
     created = TransactionService.create_transaction(
         db_session, _txn_data(account.id, category_hint="utilities", description="Lidl", amount=-1234.0)
     )
-    training = db_session.query(TrainingData).filter(TrainingData.transaction_id == created.id).first()
-    assert training.description == "Lidl"
-    assert training.amount == -1234.0
+    assert created.category_predicted == "utilities"
+    assert db_session.query(TrainingData).filter(TrainingData.transaction_id == created.id).count() == 0
 
 
-def test_category_hint_matching_prediction_does_not_duplicate_training_data(db_session, account):
+def test_category_hint_matching_prediction_keeps_prediction_and_no_training_data(db_session, account):
     created = TransactionService.create_transaction(
         db_session, _txn_data(account.id, category_hint="groceries")
     )
@@ -189,17 +201,15 @@ def test_category_hint_matching_prediction_does_not_duplicate_training_data(db_s
     assert db_session.query(TrainingData).filter(TrainingData.transaction_id == created.id).count() == 0
 
 
-def test_other_category_hint_does_not_create_training_data(db_session, account):
-    # Regression: "other" has no SEED_DATA examples, so it always "disagrees"
-    # with the model's own guess by definition. MBH/KH bank-fee rows hint
-    # "other" far more often than any real category has seed phrases, so
-    # recording every one of them as a correction skewed retrain() into
-    # predicting "other" for nearly everything, including unrelated text.
+def test_other_category_hint_may_override_at_low_confidence_without_training_data(db_session, account, monkeypatch):
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.5)
+    )
     created = TransactionService.create_transaction(
         db_session, _txn_data(account.id, category_hint="other")
     )
     assert created.category_predicted == "other"
-    assert created.category_confidence == 1.0
+    assert created.category_confidence == 0.5
     assert db_session.query(TrainingData).filter(TrainingData.transaction_id == created.id).count() == 0
 
 
@@ -212,6 +222,49 @@ def test_update_transaction_category_denormalizes_description_and_amount(db_sess
     training = db_session.query(TrainingData).filter(TrainingData.transaction_id == txn.id).first()
     assert training.description == "Lidl"
     assert training.amount == -1234.0
+
+
+def test_retrain_model_returns_no_training_data_with_zero_total(db_session):
+    result = retrain_model(trained_samples_selected=2, db=db_session)
+    assert result["status"] == "no_training_data"
+    assert result["trained_samples_total"] == 0
+    assert result["trained_samples_selected"] == 2
+
+
+def test_retrain_model_returns_explicit_total_samples_and_retrains(db_session, monkeypatch):
+    db_session.add_all([
+        TrainingData(
+            transaction_id=None,
+            description="Coffee Shop",
+            amount=-1200.0,
+            transaction_date="2026-06-01",
+            original_label="groceries",
+            corrected_label="eating_out",
+        ),
+        TrainingData(
+            transaction_id=None,
+            description="Metro Ticket",
+            amount=-450.0,
+            transaction_date="2026-06-02",
+            original_label="other",
+            corrected_label="transport",
+        ),
+    ])
+    db_session.commit()
+
+    captured = {"count": 0}
+
+    def fake_retrain(db, data):
+        captured["count"] = len(data)
+
+    monkeypatch.setattr(predictor, "retrain", fake_retrain)
+
+    result = retrain_model(trained_samples_selected=2, db=db_session)
+
+    assert result["status"] == "retrained"
+    assert result["trained_samples_total"] == 2
+    assert result["trained_samples_selected"] == 2
+    assert captured["count"] == 2
 
 
 def test_finalizing_a_transfer_category_without_a_pairing_still_succeeds(db_session, account):
@@ -249,11 +302,15 @@ def test_no_category_hint_leaves_transaction_in_review_queue(db_session, account
     assert created.category_final is None
 
 
-def test_category_hint_transactions_still_appear_in_review_queue(db_session, account):
+def test_category_hint_transactions_still_appear_in_review_queue(db_session, account, monkeypatch):
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.5)
+    )
     TransactionService.create_transaction(db_session, _txn_data(account.id, category_hint="utilities"))
 
-    review = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
+    review, total = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
 
+    assert total == 1
     assert len(review) == 1
     assert review[0].category_predicted == "utilities"
 
@@ -407,7 +464,7 @@ def test_get_transactions_for_review_attaches_transfer_pair_account_id(db_sessio
     )
     TransactionService.set_transfer_pair(db_session, out.id, second_account.id)
 
-    results = TransactionService.get_transactions_for_review(db_session, limit=50, include_finalized=True)
+    results, _ = TransactionService.get_transactions_for_review(db_session, limit=50, include_finalized=True)
     out_result = next(t for t in results if t.id == out.id)
     assert out_result.transfer_match_account_id == second_account.id
 
@@ -419,6 +476,10 @@ def test_get_transactions_attaches_none_when_not_a_transfer(db_session, account)
 
 
 def test_detect_and_flag_curve_duplicates_links_pair_and_enriches_canonical(db_session, account, second_account):
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.5)
+    )
     db_session.add(Card(account_id=account.id, card_number="****9948"))
     db_session.commit()
 
@@ -448,9 +509,13 @@ def test_detect_and_flag_curve_duplicates_links_pair_and_enriches_canonical(db_s
     assert curve.is_duplicate is True
     assert curve.duplicate_of_id == canonical.id
     assert curve.category_final == "utilities"  # auto-closed out of the review queue
+    monkeypatch.undo()
 
 
-def test_detect_and_flag_curve_duplicates_does_not_overwrite_confirmed_category(db_session, account, second_account):
+def test_detect_and_flag_curve_duplicates_does_not_overwrite_confirmed_category(db_session, account, second_account, monkeypatch):
+    monkeypatch.setattr(
+        predictor, "predict", lambda db, description, amount=None, account_type=None, date=None: ("groceries", 0.5)
+    )
     db_session.add(Card(account_id=account.id, card_number="****9948"))
     db_session.commit()
 
@@ -564,8 +629,9 @@ def test_review_queue_can_be_filtered_by_account(db_session, account, second_acc
     TransactionService.create_transaction(db_session, _txn_data(account.id, fingerprint="fp-1"))
     TransactionService.create_transaction(db_session, _txn_data(second_account.id, fingerprint="fp-2"))
 
-    review = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
+    review, total = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
 
+    assert total == 1
     assert len(review) == 1
     assert review[0].account_id == account.id
 
@@ -579,10 +645,11 @@ def test_review_queue_can_be_filtered_by_multiple_accounts(db_session, account, 
     TransactionService.create_transaction(db_session, _txn_data(second_account.id, fingerprint="fp-2"))
     TransactionService.create_transaction(db_session, _txn_data(third_account.id, fingerprint="fp-3"))
 
-    review = TransactionService.get_transactions_for_review(
+    review, total = TransactionService.get_transactions_for_review(
         db_session, account_id=f"{account.id},{second_account.id}"
     )
 
+    assert total == 2
     assert {t.account_id for t in review} == {account.id, second_account.id}
 
 
@@ -590,8 +657,9 @@ def test_review_queue_excludes_finalized_by_default(db_session, account):
     txn = TransactionService.create_transaction(db_session, _txn_data(account.id))
     TransactionService.update_transaction_category(db_session, txn.id, "groceries")
 
-    review = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
+    review, total = TransactionService.get_transactions_for_review(db_session, account_id=account.id)
 
+    assert total == 0
     assert review == []
 
 
@@ -599,10 +667,11 @@ def test_review_queue_can_include_finalized(db_session, account):
     txn = TransactionService.create_transaction(db_session, _txn_data(account.id))
     TransactionService.update_transaction_category(db_session, txn.id, "groceries")
 
-    review = TransactionService.get_transactions_for_review(
+    review, total = TransactionService.get_transactions_for_review(
         db_session, account_id=account.id, include_finalized=True
     )
 
+    assert total == 1
     assert len(review) == 1
     assert review[0].category_final == "groceries"
 

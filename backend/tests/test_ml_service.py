@@ -188,7 +188,7 @@ def test_predict_without_amount_is_unconstrained(predictor, db_session):
 
 def test_match_known_merchant_finds_real_examples():
     assert _match_known_merchant("Vásárlás LIDL HU 334 Debrecen") == "groceries"
-    assert _match_known_merchant("MOL 18355 sz. toltoallomas") == "transport"
+    assert _match_known_merchant("MOL 18355 sz. toltoallomas") == "fuel"
     assert _match_known_merchant("Booking.com Hotel") == "travel"
     assert _match_known_merchant("Rossmann 278.") == "health"
 

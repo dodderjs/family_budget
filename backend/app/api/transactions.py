@@ -7,7 +7,7 @@ from app.models.schemas import (
     UploadRequest, TransactionResponse, TransactionListResponse, TransactionUpdate, TransferPairUpdate,
     AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
     CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate,
-    CategoryCreate, CategoryResponse
+    CategoryCreate, CategoryResponse, RetrainModelResponse
 )
 from app.services.transaction_service import (
     TransactionService, DuplicateTransactionError, TransactionNotFoundError
@@ -322,14 +322,18 @@ def get_monthly_trends(
     """Get monthly trends"""
     return TransactionService.get_monthly_trends(db, account_id, date_from, date_to)
 
-@router.post("/ml/retrain")
-def retrain_model(db: Session = Depends(get_db)):
+@router.post("/ml/retrain", response_model=RetrainModelResponse)
+def retrain_model(trained_samples_selected: int = 0, db: Session = Depends(get_db)):
     """Retrain ML model with user corrections"""
     from app.services.ml_service import predictor
     
     training_data = db.query(TrainingData).all()
     if not training_data:
-        return {"status": "no_training_data"}
+        return {
+            "status": "no_training_data",
+            "trained_samples_total": 0,
+            "trained_samples_selected": max(0, trained_samples_selected),
+        }
 
     # description/amount/transaction_date are denormalized onto TrainingData at
     # creation time so a correction still trains the model after its original
@@ -353,4 +357,8 @@ def retrain_model(db: Session = Depends(get_db)):
     if data:
         predictor.retrain(db, data)
     
-    return {"status": "retrained", "samples": len(data)}
+    return {
+        "status": "retrained",
+        "trained_samples_total": len(data),
+        "trained_samples_selected": max(0, trained_samples_selected),
+    }

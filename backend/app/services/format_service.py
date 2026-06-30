@@ -18,6 +18,7 @@ BANK_FORMATS = {
         "merchantFields": ["Description"],
         "currencyField": "Currency",
         "signRule": "as_is",
+        "typeField": "Type",
         "stateField": "State",
         "skipStates": {"PENDING", "REVERTED"},
         "accountNumberField": None,  # not present in Revolut's export
@@ -37,6 +38,7 @@ BANK_FORMATS = {
         # actual direction is carried in "Type" (e.g. REFUNDED vs a normal spend).
         "signRule": "expense_unless_refund",
         "typeField": "Type",
+        "defaultType": "Card Payment",
         "refundValue": "REFUNDED",
         "accountNumberField": "Card Last 4 Digits",
         "categoryField": "Category",
@@ -50,7 +52,7 @@ BANK_FORMATS = {
         "dateFormat": "%Y.%m.%d.",
         "amountField": "Összeg",
         "amountLocale": "hu",
-        "descriptionFields": ["Megbízás típusa"],
+        "descriptionFields": ["Közlemény", "Kiegészítő információ","Megbízás típusa"],
         # "Ellenoldali számla tulajdonosa" (counterparty name) comes first -
         # for transfers/fees/incoming items it's the real merchant/payer
         # (e.g. "Morgan Stanley"). "Tranzakció helye" (transaction location)
@@ -58,9 +60,10 @@ BANK_FORMATS = {
         # generic channel label ("MobilApp", "Kozpont", "Bankon kivulrol
         # erkezo") that would otherwise mask the real counterparty - it's
         # only the genuine merchant for card purchases, which have no counterparty.
-        "merchantFields": ["Ellenoldali számla tulajdonosa", "Tranzakció helye"],
+        "merchantFields": ["Ellenoldali számla tulajdonosa", "Ellenoldali számla száma","Tranzakció helye"],
         "currencyField": "Devizanem",
         "signRule": "as_is",
+        "typeField": "Megbízás típusa",
         "accountNumberField": "Számla",
         "categoryField": "Megbízás típusa",
         "categoryMap": MBH_CATEGORY_MAP,
@@ -73,10 +76,11 @@ BANK_FORMATS = {
         "dateFormat": "%Y.%m.%d",
         "amountField": "összeg",
         "amountLocale": "hu",
-        "descriptionFields": ["típus"],
-        "merchantFields": ["partner elnevezése"],
+        "descriptionFields": ["közlemény", "partner elnevezése", "partner számla", "partner másodlagos számlaazonosító", "típus"],
+        "merchantFields": ["partner elnevezése", "partner számla", "partner másodlagos számlaazonosító"],
         "currencyField": "összeg devizaneme",
         "signRule": "as_is",
+        "typeField": "típus",
         "accountNumberField": "könyvelési számla",
         "categoryField": "típus",
         "categoryMap": KH_CATEGORY_MAP,

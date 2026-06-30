@@ -8,6 +8,7 @@ class TransactionBase(BaseModel):
     currency: str = "HUF"
     description: str
     merchant: Optional[str] = None
+    type: Optional[str] = None
     account_id: str
 
 class TransactionCreate(TransactionBase):
@@ -116,6 +117,12 @@ class AnalyticsSummary(BaseModel):
 class TrainingDataCreate(BaseModel):
     transaction_id: str
     corrected_label: str
+
+
+class RetrainModelResponse(BaseModel):
+    status: str
+    trained_samples_total: int = 0
+    trained_samples_selected: int = 0
 
 class CoverageMonthEntry(BaseModel):
     month: str

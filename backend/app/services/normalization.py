@@ -118,6 +118,11 @@ def normalize_transaction(row: dict, mapping: dict, account_id: str) -> dict:
             raw_category = _first_nonempty(row, [category_field])
             category_hint = _map_category(raw_category, mapping.get("categoryMap"))
 
+        type_field = mapping.get("typeField")
+        transaction_type = _first_nonempty(row, [type_field]) if type_field else None
+        if not transaction_type:
+            transaction_type = mapping.get("defaultType")
+
         account_number_field = mapping.get("accountNumberField")
         card_hint = _first_nonempty(row, [account_number_field]) if account_number_field else None
 
@@ -131,6 +136,7 @@ def normalize_transaction(row: dict, mapping: dict, account_id: str) -> dict:
             "account_id": account_id,
             "raw_source": json.dumps(row),
             "category_hint": category_hint,
+            "type": transaction_type,
             "card_hint": card_hint,
         }
     except Exception as e:

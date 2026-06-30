@@ -16,6 +16,7 @@ def test_revolut_card_payment_is_negative():
     assert result["date"] == "2024-12-31"
     assert result["amount"] == -17224.00
     assert result["currency"] == "HUF"
+    assert result["type"] == "Card Payment"
     assert result["merchant"] == "Lidl"
 
 
@@ -27,6 +28,7 @@ def test_revolut_topup_is_positive():
     }
     result = normalize_transaction(row, mapping, "acc-1")
     assert result["amount"] == 40000.00
+    assert result["type"] == "Topup"
 
 
 def test_revolut_skips_pending_and_reverted():
@@ -46,6 +48,7 @@ def test_curve_normal_spend_becomes_negative():
     result = normalize_transaction(row, mapping, "acc-1")
     assert result["date"] == "2021-09-14"
     assert result["amount"] == -6805.00
+    assert result["type"] == "Card Payment"
     assert result["merchant"] == "Otpmobl*Icsekk Applika"
 
 
@@ -57,6 +60,7 @@ def test_curve_refund_stays_positive():
     }
     result = normalize_transaction(row, mapping, "acc-1")
     assert result["amount"] == 500.00
+    assert result["type"] == "REFUNDED"
 
 
 @pytest.mark.parametrize("curve_category,expected_hint", [
@@ -123,6 +127,7 @@ def test_mbh_hungarian_amount_format():
     result = normalize_transaction(row, mapping, "acc-1")
     assert result["amount"] == -100000.00
     assert result["date"] == "2025-11-27"
+    assert result["type"] == "Átutalás"
 
 
 def test_mbh_merchant_falls_back_to_counterparty_when_no_location():
@@ -210,6 +215,7 @@ def test_kh_plain_integer_amount():
     result = normalize_transaction(row, mapping, "acc-1")
     assert result["amount"] == -21463.0
     assert result["date"] == "2021-12-31"
+    assert result["type"] == "Vásárlás belföldi kereskedőnél"
     assert result["merchant"] == "Kifli.hu"
 
 

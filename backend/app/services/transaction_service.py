@@ -27,6 +27,7 @@ _REVIEW_SORTABLE_COLUMNS = {
     "date": Transaction.date,
     "amount": Transaction.amount,
     "account_id": Transaction.account_id,
+    "type": Transaction.type,
     "merchant": Transaction.merchant,
     "description": Transaction.description,
     "category_predicted": Transaction.category_predicted,
@@ -46,6 +47,7 @@ _REVIEW_SORTABLE_COLUMNS = {
 _REVIEW_FILTERABLE_COLUMNS = {
     "date": Transaction.date,
     "amount": Transaction.amount,
+    "type": Transaction.type,
     "description": Transaction.description,
     "merchant": Transaction.merchant,
     "category_predicted": Transaction.category_predicted,
@@ -253,14 +255,12 @@ class TransactionService:
             transaction_data.get("account_type"), transaction_data["date"]
         )
 
-        # Some bank exports (e.g. Curve) already tag a category. Treat it as
-        # a trusted default prediction (full confidence, overriding the ML
-        # guess) rather than an ML guess - but still leave category_final
-        # unset so it goes through the normal review queue like everything
-        # else, and feed it back as training data so the model learns from it.
+        # Some bank exports already carry a category-like hint. Use it only
+        # when the model is uncertain enough.
         category_hint = transaction_data.get("category_hint")
-        predicted_category = category_hint or category
-        predicted_confidence = 1.0 if category_hint else confidence
+        use_hint = bool(category_hint) and confidence < 0.90
+        predicted_category = category_hint if use_hint else category
+        predicted_confidence = confidence
 
         # Create transaction
         db_transaction = Transaction(
@@ -272,6 +272,7 @@ class TransactionService:
             exchange_rate=exchange_rate,
             description=transaction_data["description"],
             merchant=transaction_data.get("merchant"),
+            type=transaction_data.get("type"),
             raw_source=transaction_data.get("raw_source"),
             hash_fingerprint=transaction_data["hash_fingerprint"],
             category_predicted=predicted_category,
@@ -282,26 +283,6 @@ class TransactionService:
         db.add(db_transaction)
         db.commit()
         db.refresh(db_transaction)
-
-        # "other" is the deliberate catch-all and has no SEED_DATA examples of
-        # its own, so it never disagrees with anything except by definition -
-        # every "other"-hinted row (MBH/KH bank fees, Curve's "general"/
-        # "finance"/etc) would otherwise become a training example. Bank-fee
-        # rows in particular vastly outnumber the handful of English seed
-        # phrases for every real category, so retraining on them skewed the
-        # whole classifier toward predicting "other" for everything,
-        # including completely unrelated descriptions (e.g. "Lidl").
-        if category_hint and category_hint != category and category_hint != "other":
-            db.add(TrainingData(
-                transaction_id=db_transaction.id,
-                description=db_transaction.description,
-                amount=db_transaction.amount,
-                transaction_date=db_transaction.date,
-                merchant_key=_merchant_key(db_transaction.description),
-                original_label=category,
-                corrected_label=category_hint,
-            ))
-            db.commit()
 
         return db_transaction
     

@@ -61,6 +61,7 @@ class Transaction(Base):
     exchange_rate = Column(Float, nullable=True)
     description = Column(String(500), nullable=False)
     merchant = Column(String(255), nullable=True)
+    type = Column(String(100), nullable=True)
     raw_source = Column(Text, nullable=True)
     hash_fingerprint = Column(String(64), unique=True, nullable=False)
     category_predicted = Column(String(50), nullable=True)
