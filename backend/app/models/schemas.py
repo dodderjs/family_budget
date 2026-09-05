@@ -143,6 +143,13 @@ class CategoryCreate(BaseModel):
     # None creates a main (group) category; set, creates a leaf under that
     # main - see CategoryService.create_leaf_category for validation.
     parent_id: Optional[str] = None
+    is_income: Optional[bool] = None
+
+class CategoryUpdate(BaseModel):
+    label: Optional[str] = None
+    is_income: Optional[bool] = None
+    requires_transfer_account: Optional[bool] = None
+    parent_id: Optional[str] = None
 
 class CategoryResponse(BaseModel):
     id: str
@@ -151,6 +158,7 @@ class CategoryResponse(BaseModel):
     parent_id: Optional[str] = None
     sign: Optional[str] = None
     requires_transfer_account: bool = False
+    is_income: Optional[bool] = None
     ml_index: Optional[int] = None
     # How many transactions have category_final actually set to this leaf -
     # attached by CategoryService.list_categories at query time. Always 0

@@ -88,6 +88,8 @@ export interface MonthlyTrendEntry {
 }
 
 export type MonthlyTrends = Record<string, MonthlyTrendEntry>;
+export type CategoryLevel = 'leaf' | 'parent';
+export type StackedMonthlyTrends = Record<string, { income: Record<string, number>; expenses: Record<string, number> }>;
 
 export interface RetrainModelResponse {
   status: string;
@@ -136,6 +138,7 @@ export interface CategoryNode {
   parent_id: string | null;
   sign: 'positive' | 'negative' | null;
   requires_transfer_account: boolean;
+  is_income: boolean | null;
   ml_index: number | null;
   // How many transactions currently have category_final set to this leaf
   // (0 for mains - never assigned to a transaction directly).
@@ -188,19 +191,52 @@ export const transactionService = {
   setTransferPair: (id: string, account_id: string | null) =>
     api.patch<Transaction>(`/transactions/${id}/transfer`, { account_id }),
 
-  getAnalyticsSummary: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
-    api.get<AnalyticsSummary>('/analytics/summary', { params: { account_id, date_from, date_to } }),
+  getAnalyticsSummary: (
+    account_id?: string | null,
+    date_from?: string | null,
+    date_to?: string | null,
+    category_keys?: string,
+    merchant_names?: string
+  ) =>
+    api.get<AnalyticsSummary>('/analytics/summary', {
+      params: { account_id, date_from, date_to, category_keys, merchant_names },
+    }),
 
   getCategoryBreakdown: (
     account_id?: string | null,
     date_from?: string | null,
     date_to?: string | null,
-    group_by: BreakdownGroupBy = 'category'
+    group_by: BreakdownGroupBy = 'category',
+    category_level: CategoryLevel = 'leaf',
+    category_keys?: string,
+    merchant_names?: string
   ) =>
-    api.get<CategoryBreakdown>('/analytics/breakdown', { params: { account_id, date_from, date_to, group_by } }),
+    api.get<CategoryBreakdown>('/analytics/breakdown', {
+      params: { account_id, date_from, date_to, group_by, category_level, category_keys, merchant_names },
+    }),
 
-  getMonthlyTrends: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
-    api.get<MonthlyTrends>('/analytics/trends', { params: { account_id, date_from, date_to } }),
+  getMonthlyTrends: (
+    account_id?: string | null,
+    date_from?: string | null,
+    date_to?: string | null,
+    category_keys?: string,
+    merchant_names?: string
+  ) =>
+    api.get<MonthlyTrends>('/analytics/trends', {
+      params: { account_id, date_from, date_to, category_keys, merchant_names },
+    }),
+
+  getStackedMonthlyTrends: (
+    account_id?: string | null,
+    date_from?: string | null,
+    date_to?: string | null,
+    category_level: CategoryLevel = 'leaf',
+    category_keys?: string,
+    merchant_names?: string
+  ) =>
+    api.get<StackedMonthlyTrends>('/analytics/trends/stacked', {
+      params: { account_id, date_from, date_to, category_level, category_keys, merchant_names },
+    }),
 
   retrainModel: (trained_samples_selected = 0) =>
     api.post<RetrainModelResponse>('/ml/retrain', null, { params: { trained_samples_selected } }),
@@ -214,9 +250,16 @@ export const transactionService = {
   listCategories: () =>
     api.get<CategoryNode[]>('/categories'),
 
-  createMainCategory: (label: string) =>
-    api.post<CategoryNode>('/categories', { label }),
+  createMainCategory: (label: string, isIncome?: boolean | null) =>
+    api.post<CategoryNode>('/categories', { label, is_income: isIncome ?? null }),
 
-  createLeafCategory: (label: string, parentId: string) =>
-    api.post<CategoryNode>('/categories', { label, parent_id: parentId }),
+  createLeafCategory: (label: string, parentId: string, isIncome?: boolean | null) =>
+    api.post<CategoryNode>('/categories', { label, parent_id: parentId, is_income: isIncome ?? null }),
+
+  updateCategory: (id: string, updates: {
+    label?: string;
+    is_income?: boolean | null;
+    requires_transfer_account?: boolean;
+    parent_id?: string;
+  }) => api.patch<CategoryNode>(`/categories/${id}`, updates),
 };

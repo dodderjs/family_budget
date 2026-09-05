@@ -1,4 +1,18 @@
-import { Badge, Button, Container, Group, Select, Stack, Switch, Text, Title } from '@mantine/core';
+import {
+  Box,
+  Button,
+  Chip,
+  Container,
+  FormControlLabel,
+  IconButton,
+  MenuItem,
+  Stack,
+  Switch,
+  TextField,
+  Tooltip,
+  Typography
+} from '@mui/material';
+import SwapHorizRoundedIcon from '@mui/icons-material/SwapHorizRounded';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import { AllCommunityModule, ColDef, IServerSideDatasource, ModuleRegistry } from 'ag-grid-community';
@@ -73,7 +87,6 @@ export const ReviewPage: React.FC = () => {
   const [pairCategoryConflicts, setPairCategoryConflicts] = useState<Record<string, string>>({});
   const gridRef = useRef<AgGridReact>(null);
   const pageSizeRef = useRef(DEFAULT_PAGE_SIZE);
-  pageSizeRef.current = pageSize;
 
   const selectedAccountIds = useTransactionStore((s) => s.selectedAccountIds);
   const accounts = useTransactionStore((s) => s.accounts);
@@ -117,10 +130,10 @@ export const ReviewPage: React.FC = () => {
       const q = queryRef.current;
       const sort = req.sortModel?.[0];
       const startRow = req.startRow ?? 0;
-      // cacheBlockSize is read-only after grid init and stays at DEFAULT_PAGE_SIZE.
-      // req.endRow always equals startRow + cacheBlockSize (20), so using it as
-      // the limit ignores the user's selected page size entirely. Always derive
-      // the limit from the live pagination API instead.
+      // cacheBlockSize is kept in step with the page size (see
+      // onPaginationChanged), so one block request is exactly one grid page.
+      // The limit still comes from the live pagination API rather than
+      // req.endRow, so a block requested mid-resize can't be short.
       const currentPageSize = gridRef.current?.api.paginationGetPageSize() ?? pageSizeRef.current;
       const endRow = startRow + currentPageSize;
       try {
@@ -340,8 +353,6 @@ export const ReviewPage: React.FC = () => {
       width: 150,
       cellClass: 'fixed-column',
       filter: 'agDateColumnFilter',
-      // Carries the master/detail expand toggle - only rows flagged by
-      // isRowMaster (a Curve/bank duplicate) actually show the chevron.
       cellRenderer: 'agGroupCellRenderer',
     },
     ...(showAccountColumn ? [{
@@ -382,34 +393,63 @@ export const ReviewPage: React.FC = () => {
           : undefined;
         return (
           <div style={CELL_CENTER_STYLE}>
-            <Group gap={4} wrap="nowrap" align="center" style={{ width: '100%' }}>
-              <Select
-                size="xs"
-                style={{ flex: 1, minWidth: 0 }}
-                placeholder={needsTransfer ? 'Required for this category' : 'Not a transfer'}
+            <Stack direction="row" spacing={0.5} sx={{ width: '100%', alignItems: 'center' }}>
+              <TextField
+                select
+                size="small"
+                sx={{ flex: 1, minWidth: 0 }}
                 error={needsTransfer}
-                data={accounts.filter((a) => a.id !== params.data.account_id).map((a) => ({ value: a.id, label: a.name }))}
-                value={params.data.transfer_match_account_id || null}
-                onChange={(val) => handleTransferAccountChange(params.data.id, val)}
-                clearable
-                comboboxProps={{ withinPortal: true }}
-              />
+                value={params.data.transfer_match_account_id || ''}
+                onChange={(event) => handleTransferAccountChange(params.data.id, event.target.value || null)}
+                placeholder={needsTransfer ? 'Required for this category' : 'Not a transfer'}
+              >
+                <MenuItem value="">
+                  {needsTransfer ? 'Required for this category' : 'Not a transfer'}
+                </MenuItem>
+                {accounts
+                  .filter((a) => a.id !== params.data.account_id)
+                  .map((a) => (
+                    <MenuItem key={a.id} value={a.id}>
+                      {a.name}
+                    </MenuItem>
+                  ))}
+              </TextField>
               {params.data.is_transfer && (
-                <Badge
-                  size="lg"
-                  circle
-                  variant={pairedRow ? 'filled' : 'outline'}
-                  color="teal"
-                  style={{ cursor: pairedRow ? 'pointer' : 'default', flexShrink: 0 }}
-                  onClick={pairedRow ? () => handleJumpToPair(params.data.transfer_match_id) : undefined}
+                <Tooltip
                   title={pairedRow
                     ? `Transfer pair - click to jump to: ${pairedRow.description} (${pairedRow.date})`
                     : 'Transfer pair - the other side isn\'t in the current view (different filter or not yet loaded)'}
                 >
-                  ⇄
-                </Badge>
+                  {/* Solid = the counterpart row is loaded in the grid and
+                      clicking jumps to it; hollow = it isn't, so this is an
+                      indicator only. Kept icon-only and circular: the column
+                      is 210px and the account Select needs the rest of it.
+                      Tooltip needs an element that holds a ref, hence the
+                      wrapping span. */}
+                  <span style={{ display: 'inline-flex', flexShrink: 0 }}>
+                    <IconButton
+                      size="small"
+                      disableRipple={!pairedRow}
+                      onClick={pairedRow ? () => handleJumpToPair(params.data.transfer_match_id) : undefined}
+                      sx={{
+                        width: 26,
+                        height: 26,
+                        border: '1px solid',
+                        borderColor: 'info.main',
+                        color: pairedRow ? 'info.contrastText' : 'info.main',
+                        backgroundColor: pairedRow ? 'info.main' : 'transparent',
+                        cursor: pairedRow ? 'pointer' : 'default',
+                        '&:hover': {
+                          backgroundColor: pairedRow ? 'info.dark' : 'action.hover',
+                        },
+                      }}
+                    >
+                      <SwapHorizRoundedIcon sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </span>
+                </Tooltip>
               )}
-            </Group>
+            </Stack>
           </div>
         );
       }
@@ -433,10 +473,11 @@ export const ReviewPage: React.FC = () => {
     {
       field: 'description',
       headerName: 'Description',
-      flex: 2,
+      // flex: 2,
       filter: 'agTextColumnFilter',
       wrapText: true,
-      autoHeight: true
+      width: 300,
+      // autoHeight: true
     },
     {
       field: 'merchant',
@@ -451,26 +492,22 @@ export const ReviewPage: React.FC = () => {
         const pairedRow = params.data.duplicate_of_id
           ? params.api.getRowNode(params.data.duplicate_of_id)?.data
           : undefined;
-        return (
-          <div style={CELL_CENTER_STYLE}>
-            <Group gap={4} wrap="nowrap">
-              <Text size="sm">{params.value || ''}</Text>
+        return (<>
+              {params.value || ''}
               {params.data.duplicate_of_id && (
-                <Badge
-                  size="xs"
-                  variant="dot"
-                  color="blue"
-                  style={{ cursor: pairedRow ? 'pointer' : 'default' }}
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  sx={{ cursor: pairedRow ? 'pointer' : 'default' }}
                   onClick={pairedRow ? () => handleJumpToPair(params.data.duplicate_of_id) : undefined}
+                  label={params.data.is_duplicate ? 'curve copy' : 'via curve'}
                   title={pairedRow
                     ? `Curve pair - click to jump to: ${pairedRow.description} (${pairedRow.date})`
                     : 'Linked Curve/bank-account transaction - expand the row to view it'}
-                >
-                  {params.data.is_duplicate ? 'curve copy' : 'via curve'}
-                </Badge>
+                />
               )}
-            </Group>
-          </div>
+            </>
         );
       }
     },
@@ -487,9 +524,7 @@ export const ReviewPage: React.FC = () => {
       filter: 'agTextColumnFilter',
       cellRenderer: (params: any) => (
         <div style={CELL_CENTER_STYLE}>
-          <Badge size="sm" variant="light">
-            {params.value || 'N/A'}
-          </Badge>
+          <Chip size="small" variant="outlined" label={params.value || 'N/A'} />
         </div>
       )
     },
@@ -500,12 +535,10 @@ export const ReviewPage: React.FC = () => {
       filter: 'agNumberColumnFilter',
       cellRenderer: (params: any) => {
         const value = params.value || 0;
-        const color = value >= 0.75 ? 'green' : value >= 0.5 ? 'yellow' : 'red';
+        const color = value >= 0.75 ? 'success' : value >= 0.5 ? 'warning' : 'error';
         return (
           <div style={CELL_CENTER_STYLE}>
-            <Badge color={color} variant="light" size="sm">
-              {(value * 100).toFixed(0)}%
-            </Badge>
+            <Chip color={color} variant="outlined" size="small" label={`${(value * 100).toFixed(0)}%`} />
           </div>
         );
       }
@@ -535,21 +568,19 @@ export const ReviewPage: React.FC = () => {
         const needsTransfer = requiresTransferAccount(prefill) && !params.data.transfer_match_account_id;
         return (
           <div style={CELL_CENTER_STYLE}>
-            <Group gap={4} wrap="nowrap" align="center" style={{ width: '100%' }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
+            <Stack direction="row" spacing={0.5} sx={{ width: '100%', alignItems: 'center' }}>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
                 <CategoryPicker
                   value={prefill}
                   onChange={(leafKey) => handleCategoryUpdate(params.data as Transaction, leafKey)}
                   error={needsTransfer}
                   placeholder="Select category"
                 />
-              </div>
+              </Box>
               {pairCategoryConflicts[params.data.id] && (
-                <Badge size="sm" color="yellow" variant="light" title={pairCategoryConflicts[params.data.id]}>
-                  !
-                </Badge>
+                <Chip size="small" color="warning" variant="outlined" title={pairCategoryConflicts[params.data.id]} label="!" />
               )}
-            </Group>
+            </Stack>
           </div>
         );
       }
@@ -560,12 +591,6 @@ export const ReviewPage: React.FC = () => {
     theme: agGridTheme,
     rowModelType: 'serverSide' as const,
     serverSideDatasource: datasource,
-    // One DB-backed page per grid page; keep the block size aligned with the
-    // page size so a page is exactly one block request.
-    pagination: true,
-    paginationPageSize: pageSize,
-    paginationPageSizeSelector: PAGE_SIZE_OPTIONS,
-    cacheBlockSize: pageSize,
     masterDetail: true,
     isRowMaster: (data: any) => !!data?.duplicate_of_id,
     detailCellRenderer: LinkedTransactionDetail,
@@ -584,9 +609,16 @@ export const ReviewPage: React.FC = () => {
     onSelectionChanged: (e: any) => setSelectedCount(e.api.getSelectedRows().length),
     onPaginationChanged: (e: any) => {
       const newPageSize = e.api.paginationGetPageSize();
-      if (newPageSize !== pageSize) {
-        setPageSize(newPageSize);
-      }
+      if (newPageSize === pageSizeRef.current) return;
+      // cacheBlockSize has to follow the page size or the grid asks for rows
+      // in 20-row blocks while paginating 100 at a time, which desyncs its
+      // row bookkeeping and prints a nonsense "X to Y of Z / Page N of M".
+      // It isn't a reactive prop, so it goes through the grid API - and every
+      // cached block is now the wrong size, hence the purge.
+      pageSizeRef.current = newPageSize;
+      setPageSize(newPageSize);
+      e.api.setGridOption('cacheBlockSize', newPageSize);
+      e.api.refreshServerSide({ purge: true });
     },
     rowSelection: {
       mode: "multiRow" as const,
@@ -606,52 +638,52 @@ export const ReviewPage: React.FC = () => {
   };
 
   return (
-    <Container size="xl" py="xl" fluid>
-      <Stack gap="lg">
-        <div>
-          <Title order={1}>Review & Categorize</Title>
-          <Text c="dimmed">Review and correct transaction categories</Text>
-        </div>
+    <Container maxWidth={false} sx={{ py: 4 }}>
+      <Stack spacing={3}>
 
         <FilterBar />
 
-        <Group>
-          <Button onClick={refresh}>
+        <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: 'wrap', alignItems: 'center' }}>
+          <Button onClick={refresh} variant="contained">
             Refresh
           </Button>
-          <Button onClick={() => transactionService.retrainModel()} variant="outline">
+          <Button onClick={() => transactionService.retrainModel()} variant="outlined">
             Retrain Model
           </Button>
-          <Button onClick={handleSelectPage} variant="default">
+          <Button onClick={handleSelectPage} variant="outlined">
             Select Page
           </Button>
           <Button
             onClick={() => gridRef.current?.api.deselectAll()}
-            variant="default"
+            variant="outlined"
             disabled={selectedCount === 0}
           >
             Clear Selection
           </Button>
           <Button
             onClick={handleConfirmSelected}
-            loading={bulkConfirming}
+            variant="contained"
             disabled={selectedCount === 0}
-            color="green"
+            color="success"
           >
-            Confirm & Retrain Selected{selectedCount > 0 ? ` (${selectedCount})` : ''}
+            {bulkConfirming ? 'Confirming...' : `Confirm & Retrain Selected${selectedCount > 0 ? ` (${selectedCount})` : ''}`}
           </Button>
-          <Button onClick={exportCsv} variant="default">
+          <Button onClick={exportCsv} variant="outlined">
             Export CSV
           </Button>
-          <Switch
+          <FormControlLabel
             label="Show already-categorized transactions"
-            checked={includeFinalized}
-            onChange={(e) => setIncludeFinalized(e.currentTarget.checked)}
+            control={
+              <Switch
+                checked={includeFinalized}
+                onChange={(event) => setIncludeFinalized(event.target.checked)}
+              />
+            }
           />
-        </Group>
+        </Stack>
 
         {lastConfirmSummary && (
-          <Text size="sm" c="dimmed">{lastConfirmSummary}</Text>
+          <Typography variant="body2" color="text.secondary">{lastConfirmSummary}</Typography>
         )}
 
         <div style={{ height: '600px', width: '100%' }}>
@@ -659,6 +691,10 @@ export const ReviewPage: React.FC = () => {
             ref={gridRef}
             gridOptions={gridOptions}
             columnDefs={columns}
+            pagination
+            paginationPageSize={pageSize}
+            paginationPageSizeSelector={PAGE_SIZE_OPTIONS}
+            cacheBlockSize={pageSize}
           />
         </div>
       </Stack>

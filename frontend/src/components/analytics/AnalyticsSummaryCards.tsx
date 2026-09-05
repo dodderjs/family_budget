@@ -1,4 +1,4 @@
-import { Card, Grid, Text } from '@mantine/core';
+import { Box, Card, CardContent, Typography } from '@mui/material';
 import React from 'react';
 import { AnalyticsSummary } from '../../services/transactionService';
 import { formatCurrency } from '../../utils/currency';
@@ -20,51 +20,71 @@ export const AnalyticsSummaryCards: React.FC<AnalyticsSummaryCardsProps> = ({
   summary,
   previousSummary,
   selectedAccountCount,
-}) => (
-  <Grid gutter="lg">
-    <Grid.Col span={{ base: 12, md: 3 }}>
-      <Card withBorder p="lg">
-        <Text size="xs" fw={500}>Total Transactions</Text>
-        <Text size="xl" fw={700}>{summary.total_transactions}</Text>
-        {previousSummary && (
-          <Text size="xs" c="dimmed">{delta(summary.total_transactions, previousSummary.total_transactions)}</Text>
-        )}
-      </Card>
-    </Grid.Col>
-    <Grid.Col span={{ base: 12, md: 3 }}>
-      <Card withBorder p="lg" c="green">
-        <Text size="xs" fw={500}>Total Income</Text>
-        <Text size="xl" fw={700}>{formatCurrency(summary.total_income)}</Text>
-        {previousSummary && (
-          <Text size="xs" c="dimmed">{delta(summary.total_income, previousSummary.total_income)}</Text>
-        )}
-      </Card>
-    </Grid.Col>
-    <Grid.Col span={{ base: 12, md: 3 }}>
-      <Card withBorder p="lg" c="red">
-        <Text size="xs" fw={500}>Total Expenses</Text>
-        <Text size="xl" fw={700}>{formatCurrency(summary.total_expenses)}</Text>
-        {previousSummary && (
-          <Text size="xs" c="dimmed">{delta(summary.total_expenses, previousSummary.total_expenses)}</Text>
-        )}
-      </Card>
-    </Grid.Col>
-    <Grid.Col span={{ base: 12, md: 3 }}>
-      <Card withBorder p="lg">
-        <Text size="xs" fw={500}>Average Transaction</Text>
-        <Text size="xl" fw={700}>{formatCurrency(summary.average_transaction)}</Text>
-        {previousSummary && (
-          <Text size="xs" c="dimmed">{delta(summary.average_transaction, previousSummary.average_transaction)}</Text>
-        )}
-      </Card>
-    </Grid.Col>
-    {selectedAccountCount > 1 && (
-      <Grid.Col span={{ base: 12, md: 3 }}>
-        <Card withBorder p="lg" c="blue">
-          <Text size="xs" fw={500}>Transferred Between Selected Accounts</Text>
-          <Text size="xl" fw={700}>{formatCurrency(summary.total_transferred)}</Text>
+}) => {
+  const cards = [
+    {
+      title: 'Total Transactions',
+      value: String(summary.total_transactions),
+      deltaText: previousSummary ? delta(summary.total_transactions, previousSummary.total_transactions) : null,
+      valueColor: 'text.primary',
+    },
+    {
+      title: 'Total Income',
+      value: formatCurrency(summary.total_income),
+      deltaText: previousSummary ? delta(summary.total_income, previousSummary.total_income) : null,
+      valueColor: 'success.main',
+    },
+    {
+      title: 'Total Expenses',
+      value: formatCurrency(summary.total_expenses),
+      deltaText: previousSummary ? delta(summary.total_expenses, previousSummary.total_expenses) : null,
+      valueColor: 'error.main',
+    },
+    {
+      title: 'Average Transaction',
+      value: formatCurrency(summary.average_transaction),
+      deltaText: previousSummary ? delta(summary.average_transaction, previousSummary.average_transaction) : null,
+      valueColor: 'text.primary',
+    },
+  ];
+
+  if (selectedAccountCount > 1) {
+    cards.push({
+      title: 'Transferred Between Selected Accounts',
+      value: formatCurrency(summary.total_transferred),
+      deltaText: null,
+      valueColor: 'primary.main',
+    });
+  }
+
+  return (
+    <Box
+      sx={{
+        display: 'grid',
+        gap: 2,
+        gridTemplateColumns: {
+          xs: '1fr',
+          md: 'repeat(4, minmax(0, 1fr))',
+        },
+      }}
+    >
+      {cards.map((card) => (
+        <Card key={card.title} variant="outlined">
+          <CardContent>
+            <Typography variant="caption" sx={{ fontWeight: 500 }}>
+              {card.title}
+            </Typography>
+            <Typography variant="h5" sx={{ fontWeight: 700, color: card.valueColor }}>
+              {card.value}
+            </Typography>
+            {card.deltaText && (
+              <Typography variant="caption" color="text.secondary">
+                {card.deltaText}
+              </Typography>
+            )}
+          </CardContent>
         </Card>
-      </Grid.Col>
-    )}
-  </Grid>
-);
+      ))}
+    </Box>
+  );
+};

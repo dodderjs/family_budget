@@ -8,6 +8,18 @@ docker logs family-budget-api --tail 50                  # check it actually sta
 ```
 Backend retries its DB connection on startup (`app/db/database.py:wait_for_db`) — no manual wait needed.
 
+## Frontend package management
+
+Always run npm commands inside the container — never on the host:
+
+```bash
+docker exec family-budget-frontend npm install <package>
+docker exec family-budget-frontend npm uninstall <package>
+docker exec family-budget-frontend npm run <script>
+```
+
+Running npm on the host modifies `package.json`/`node_modules` outside the container and won't be reflected in the running dev server.
+
 ## Test
 
 ```bash

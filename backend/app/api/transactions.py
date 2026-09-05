@@ -7,7 +7,7 @@ from app.models.schemas import (
     UploadRequest, TransactionResponse, TransactionListResponse, TransactionUpdate, TransferPairUpdate,
     AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
     CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate,
-    CategoryCreate, CategoryResponse, RetrainModelResponse
+    CategoryCreate, CategoryResponse, CategoryUpdate, RetrainModelResponse
 )
 from app.services.transaction_service import (
     TransactionService, DuplicateTransactionError, TransactionNotFoundError
@@ -17,12 +17,19 @@ from app.services.account_service import (
     CardNotFoundError, CardAlreadyExistsError
 )
 from app.services.coverage_service import CoverageService
-from app.services.category_service import CategoryService, CategoryNotFoundError, ParentMustBeMainCategoryError
+from app.services.category_service import CategoryService, CategoryNotFoundError, ParentMustBeMainCategoryError, CategoryLevelChangeError, _UNSET as _IS_INCOME_UNSET
 from app.services.normalization import normalize_transaction, should_skip_row
 from app.services.format_service import get_mapping_for_format, suggest_mapping, read_csv_rows
 from app.models.transaction import Account, Transaction, TrainingData
 
 router = APIRouter(prefix="/api/v1", tags=["transactions"])
+
+
+def _parse_csv_param(value: str = None) -> list[str] | None:
+    if not value:
+        return None
+    parsed = [item.strip() for item in value.split(",") if item.strip()]
+    return parsed or None
 
 @router.post("/accounts", response_model=AccountResponse)
 def create_account(account: AccountCreate, db: Session = Depends(get_db)):
@@ -117,10 +124,31 @@ def create_category(category: CategoryCreate, db: Session = Depends(get_db)):
     existing main (parent_id set)."""
     try:
         if category.parent_id is None:
-            return CategoryService.create_main_category(db, category.label)
-        return CategoryService.create_leaf_category(db, category.label, category.parent_id)
+            return CategoryService.create_main_category(db, category.label, category.is_income)
+        return CategoryService.create_leaf_category(db, category.label, category.parent_id, category.is_income)
     except CategoryNotFoundError:
         raise HTTPException(status_code=404, detail="Parent category not found")
+    except ParentMustBeMainCategoryError:
+        raise HTTPException(status_code=400, detail="parent_id must be a main category, not a leaf")
+
+@router.patch("/categories/{category_id}", response_model=CategoryResponse)
+def update_category(category_id: str, update: CategoryUpdate, db: Session = Depends(get_db)):
+    """Update a category's properties: label, is_income, requires_transfer_account, or parent (move to different group).
+    Cannot change hierarchy level (mains stay mains, leaves stay leaves)."""
+    try:
+        # Use model_fields_set to detect if is_income was explicitly provided in the request
+        fields = update.model_fields_set
+        return CategoryService.update_category(
+            db, category_id,
+            label=update.label,
+            is_income=update.is_income if 'is_income' in fields else _IS_INCOME_UNSET,
+            requires_transfer_account=update.requires_transfer_account,
+            parent_id=update.parent_id,
+        )
+    except CategoryNotFoundError:
+        raise HTTPException(status_code=404, detail="Category not found")
+    except CategoryLevelChangeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except ParentMustBeMainCategoryError:
         raise HTTPException(status_code=400, detail="parent_id must be a main category, not a leaf")
 
@@ -296,10 +324,19 @@ def get_analytics_summary(
     account_id: str = None,
     date_from: str = None,
     date_to: str = None,
+    category_keys: str = None,
+    merchant_names: str = None,
     db: Session = Depends(get_db)
 ):
     """Get analytics summary"""
-    return TransactionService.get_analytics_summary(db, account_id, date_from, date_to)
+    return TransactionService.get_analytics_summary(
+        db,
+        account_id,
+        date_from,
+        date_to,
+        _parse_csv_param(category_keys),
+        _parse_csv_param(merchant_names),
+    )
 
 @router.get("/analytics/breakdown")
 def get_category_breakdown(
@@ -307,20 +344,63 @@ def get_category_breakdown(
     date_from: str = None,
     date_to: str = None,
     group_by: str = "category",
+    category_level: str = "leaf",
+    category_keys: str = None,
+    merchant_names: str = None,
     db: Session = Depends(get_db)
 ):
     """Get breakdown by category, merchant, or account"""
-    return TransactionService.get_category_breakdown(db, account_id, date_from, date_to, group_by)
+    return TransactionService.get_category_breakdown(
+        db,
+        account_id,
+        date_from,
+        date_to,
+        group_by,
+        category_level,
+        _parse_csv_param(category_keys),
+        _parse_csv_param(merchant_names),
+    )
 
 @router.get("/analytics/trends")
 def get_monthly_trends(
     account_id: str = None,
     date_from: str = None,
     date_to: str = None,
+    category_keys: str = None,
+    merchant_names: str = None,
     db: Session = Depends(get_db)
 ):
     """Get monthly trends"""
-    return TransactionService.get_monthly_trends(db, account_id, date_from, date_to)
+    return TransactionService.get_monthly_trends(
+        db,
+        account_id,
+        date_from,
+        date_to,
+        _parse_csv_param(category_keys),
+        _parse_csv_param(merchant_names),
+    )
+
+
+@router.get("/analytics/trends/stacked")
+def get_stacked_monthly_trends(
+    account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    category_level: str = "leaf",
+    category_keys: str = None,
+    merchant_names: str = None,
+    db: Session = Depends(get_db)
+):
+    """Get monthly trends split into stacked income/expense categories."""
+    return TransactionService.get_stacked_monthly_trends(
+        db,
+        account_id,
+        date_from,
+        date_to,
+        category_level,
+        _parse_csv_param(category_keys),
+        _parse_csv_param(merchant_names),
+    )
 
 @router.post("/ml/retrain", response_model=RetrainModelResponse)
 def retrain_model(trained_samples_selected: int = 0, db: Session = Depends(get_db)):

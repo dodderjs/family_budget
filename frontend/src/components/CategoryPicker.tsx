@@ -1,23 +1,21 @@
 import {
-  Autocomplete,
-  Box,
-  createFilterOptions,
-  createTheme,
-  IconButton,
-  TextField,
-  ThemeProvider,
-  Typography,
+    Autocomplete,
+    Box,
+    Button,
+    createFilterOptions,
+    Dialog,
+    DialogActions,
+    DialogContent,
+    DialogTitle,
+    IconButton,
+    TextField,
+    Typography,
 } from '@mui/material';
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { transactionService } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
 
-// Matches the app's dark Mantine theme so the dropdown doesn't look like a
-// foreign light-mode popup dropped into a dark grid cell.
-const muiDarkTheme = createTheme({ palette: { mode: 'dark' } });
-
-// Matches Mantine's size="xs" Select (used for the Transfer column right
-// next to this one in the grid) so the two controls line up visually.
+// Keeps control sizing aligned with the transfer selector in the same grid row.
 const CONTROL_HEIGHT = 30;
 const CONTROL_FONT_SIZE = '0.75rem';
 
@@ -38,6 +36,10 @@ interface AddMainOption {
 }
 
 type Option = LeafOption | AddMainOption;
+
+type DialogState =
+  | { mode: 'leaf'; mainId: string; mainLabel: string; labelInput: string }
+  | { mode: 'main'; labelInput: string };
 
 const filter = createFilterOptions<Option>({ stringify: (option) => option.label });
 
@@ -61,6 +63,8 @@ export const CategoryPicker: React.FC<CategoryPickerProps> = ({ value, onChange,
   const loadCategories = useTransactionStore((s) => s.loadCategories);
   const setError = useTransactionStore((s) => s.setError);
 
+  const [dialogState, setDialogState] = useState<DialogState | null>(null);
+
   const mains = useMemo(() => categories.filter((c) => !c.parent_id), [categories]);
   const mainLabelById = useMemo(() => Object.fromEntries(mains.map((m) => [m.id, m.label])), [mains]);
   const mainIdByLabel = useMemo(() => Object.fromEntries(mains.map((m) => [m.label, m.id])), [mains]);
@@ -81,41 +85,45 @@ export const CategoryPicker: React.FC<CategoryPickerProps> = ({ value, onChange,
 
   const selectedOption = useMemo(() => options.find((o) => o.key === value) || null, [options, value]);
 
-  const handleAddLeafToGroup = async (mainId: string, mainLabel: string) => {
-    const label = window.prompt(`New category under "${mainLabel}":`);
-    if (!label || !label.trim()) return;
-    try {
-      const response = await transactionService.createLeafCategory(label.trim(), mainId);
-      await loadCategories();
-      onChange(response.data.key);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || err.message || 'Failed to create category');
-    }
+  const handleAddLeafToGroup = (mainId: string, mainLabel: string) => {
+    setDialogState({ mode: 'leaf', mainId, mainLabel, labelInput: '' });
   };
 
-  const handleChange = async (_: React.SyntheticEvent, newValue: Option | null) => {
+  const handleChange = (_: React.SyntheticEvent, newValue: Option | null) => {
     // Clearing isn't a supported operation (no "unset category" endpoint) -
     // ignore it and the controlled `value` prop snaps back to the prior pick.
     if (!newValue) return;
     if (newValue.type === 'add-main') {
-      try {
-        // Mirrors the established default for new top-level categories: a
-        // main plus a same-named leaf, so it's immediately selectable.
-        const mainResponse = await transactionService.createMainCategory(newValue.newMainLabel);
-        const leafResponse = await transactionService.createLeafCategory(newValue.newMainLabel, mainResponse.data.id);
-        await loadCategories();
-        onChange(leafResponse.data.key);
-      } catch (err: any) {
-        setError(err.response?.data?.detail || err.message || 'Failed to create category');
-      }
+      setDialogState({ mode: 'main', labelInput: newValue.newMainLabel });
       return;
     }
     onChange(newValue.key);
   };
 
+  const handleCreate = async (isIncome: boolean) => {
+    if (!dialogState) return;
+    const label = dialogState.labelInput.trim();
+    if (!label) return;
+    try {
+      if (dialogState.mode === 'leaf') {
+        const response = await transactionService.createLeafCategory(label, dialogState.mainId, isIncome);
+        await loadCategories();
+        onChange(response.data.key);
+      } else {
+        const mainResponse = await transactionService.createMainCategory(label, isIncome);
+        const leafResponse = await transactionService.createLeafCategory(label, mainResponse.data.id, isIncome);
+        await loadCategories();
+        onChange(leafResponse.data.key);
+      }
+      setDialogState(null);
+    } catch (err: any) {
+      setError(err.response?.data?.detail || err.message || 'Failed to create category');
+    }
+  };
+
   return (
-    <ThemeProvider theme={muiDarkTheme}>
-      <Autocomplete<Option>
+    <>
+    <Autocomplete<Option>
         size="small"
         fullWidth
         options={options}
@@ -201,7 +209,52 @@ export const CategoryPicker: React.FC<CategoryPickerProps> = ({ value, onChange,
             fontSize: CONTROL_FONT_SIZE,
           },
         }}
-      />
-    </ThemeProvider>
+    />
+    <Dialog
+      open={!!dialogState}
+      onClose={() => setDialogState(null)}
+      maxWidth="xs"
+      fullWidth
+    >
+      <DialogTitle>
+        {dialogState?.mode === 'leaf'
+          ? `New category under "${dialogState.mainLabel}"`
+          : 'New main category'}
+      </DialogTitle>
+      <DialogContent>
+        <TextField
+          autoFocus
+          fullWidth
+          size="small"
+          label="Category name"
+          value={dialogState?.labelInput ?? ''}
+          onChange={(e) =>
+            setDialogState((prev) => prev ? { ...prev, labelInput: e.target.value } : null)
+          }
+          onKeyDown={(e) => e.stopPropagation()}
+          sx={{ mt: 1 }}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={() => setDialogState(null)}>Cancel</Button>
+        <Button
+          variant="outlined"
+          color="success"
+          disabled={!dialogState?.labelInput.trim()}
+          onClick={() => handleCreate(true)}
+        >
+          Income
+        </Button>
+        <Button
+          variant="outlined"
+          color="error"
+          disabled={!dialogState?.labelInput.trim()}
+          onClick={() => handleCreate(false)}
+        >
+          Expense
+        </Button>
+      </DialogActions>
+    </Dialog>
+  </>
   );
 };

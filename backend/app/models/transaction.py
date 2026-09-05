@@ -134,6 +134,10 @@ class Category(Base):
     # automatically at creation time (see CategoryService.create_leaf_category),
     # not user-set, so it can't go stale if the main is later renamed.
     requires_transfer_account = Column(Boolean, default=False)
+    # User-facing income/expense flag set at creation time. True = income,
+    # False = expense, None = unconstrained (Transfers, Other, seeds without
+    # a clear sign). Applies to both mains and leaves.
+    is_income = Column(Boolean, nullable=True)
     # Leaves only - the integer label a model is trained on. Assigned once,
     # permanently, when the leaf is created (never reused even if a leaf is
     # later deleted) since it's baked into the persisted model.pkl - see

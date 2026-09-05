@@ -1,7 +1,7 @@
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy import and_, or_, case, func
 from app.config import settings
-from app.models.transaction import Transaction, TrainingData, Account, Card
+from app.models.transaction import Transaction, TrainingData, Account, Card, Category
 from app.models.schemas import TransactionCreate, TransactionResponse
 from app.services.account_service import AccountNotFoundError
 from app.services.currency_service import CurrencyService, HUF
@@ -9,6 +9,22 @@ from app.services.ml_service import predictor, _merchant_key
 from app.services.normalization import detect_transfers, detect_curve_duplicates, _dates_within
 from datetime import datetime
 import json
+
+
+# Shared SQL expressions for the analytics aggregates. Kept at module level so
+# every endpoint groups by exactly the same definitions - the effective
+# category of a row is its final one, falling back to the prediction (mirrors
+# _transaction_category_key), and the month is a lexical slice of the ISO date
+# (Transaction.date is stored as YYYY-MM-DD, so substr is index-friendly and
+# behaves identically on MariaDB and the SQLite test DB).
+_SQL_CATEGORY_OR_NULL = func.coalesce(Transaction.category_final, Transaction.category_predicted)
+_SQL_CATEGORY_KEY = func.coalesce(_SQL_CATEGORY_OR_NULL, "uncategorized")
+_SQL_MONTH = func.substr(Transaction.date, 1, 7)
+_SQL_INCOME_SUM = func.sum(case((Transaction.amount > 0, Transaction.amount), else_=0.0))
+# A zero amount lands in the expense bucket (it adds nothing either way) so the
+# grouped totals match the row-by-row version this replaced.
+_SQL_EXPENSE_SUM = func.sum(case((Transaction.amount < 0, -Transaction.amount), else_=0.0))
+_SQL_SIGN_BUCKET = case((Transaction.amount > 0, "income"), else_="expenses")
 
 
 class DuplicateTransactionError(Exception):
@@ -162,6 +178,46 @@ def _build_filter_condition(column, model: dict):
 
 
 class TransactionService:
+    @staticmethod
+    def _transaction_category_key(transaction: Transaction) -> str:
+        return transaction.category_final or transaction.category_predicted or "uncategorized"
+
+    @staticmethod
+    def _build_parent_category_lookup(db: Session) -> dict[str, str]:
+        categories = db.query(Category).all()
+        by_id = {category.id: category for category in categories}
+        lookup: dict[str, str] = {}
+
+        for category in categories:
+            if not category.parent_id:
+                continue
+            parent = by_id.get(category.parent_id)
+            lookup[category.key] = parent.label if parent else category.label
+
+        return lookup
+
+    @staticmethod
+    def _apply_analytics_filters(query, category_keys: list[str] = None, merchant_names: list[str] = None):
+        if category_keys:
+            query = query.filter(
+                or_(
+                    Transaction.category_final.in_(category_keys),
+                    and_(Transaction.category_final.is_(None), Transaction.category_predicted.in_(category_keys)),
+                )
+            )
+
+        if merchant_names:
+            includes_unknown = "Unknown" in merchant_names
+            known_merchants = [merchant for merchant in merchant_names if merchant != "Unknown"]
+            if includes_unknown and known_merchants:
+                query = query.filter(or_(Transaction.merchant.in_(known_merchants), Transaction.merchant.is_(None)))
+            elif includes_unknown:
+                query = query.filter(Transaction.merchant.is_(None))
+            else:
+                query = query.filter(Transaction.merchant.in_(known_merchants))
+
+        return query
+
     @staticmethod
     def _should_auto_retrain(finalized_count: int) -> bool:
         threshold = settings.ML_AUTO_RETRAIN_FINALIZED_THRESHOLD
@@ -436,7 +492,11 @@ class TransactionService:
         total = query.count()
         sort_column = _REVIEW_SORTABLE_COLUMNS.get(sort_by, Transaction.category_confidence)
         order = sort_column.desc() if sort_dir == "desc" else sort_column.asc()
-        results = query.order_by(order).limit(limit).offset(offset).all()
+        # id is the tiebreaker: every sortable column has real ties (notably
+        # category_confidence, the default), and without a unique second key
+        # the DB is free to order tied rows differently per LIMIT/OFFSET
+        # query - which makes rows repeat or vanish as the user pages.
+        results = query.order_by(order, Transaction.id.asc()).limit(limit).offset(offset).all()
         return TransactionService._attach_transfer_pair_accounts(db, results), total
     
     @staticmethod
@@ -573,33 +633,69 @@ class TransactionService:
         return transactions
 
     @staticmethod
+    def _analytics_query(
+        db: Session,
+        *columns,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+        category_keys: list[str] = None,
+        merchant_names: list[str] = None,
+    ):
+        """Column-only base query shared by every analytics aggregate.
+        Transfers and Curve duplicates are excluded so a single real movement
+        of money is never counted twice (see CLAUDE.md)."""
+        query = db.query(*columns).filter(
+            Transaction.is_transfer == False, Transaction.is_duplicate == False
+        )
+        query = TransactionService._apply_filters(query, account_id, date_from, date_to)
+        return TransactionService._apply_analytics_filters(query, category_keys, merchant_names)
+
+    @staticmethod
     def get_analytics_summary(
-        db: Session, account_id: str = None, date_from: str = None, date_to: str = None
+        db: Session,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+        category_keys: list[str] = None,
+        merchant_names: list[str] = None,
     ):
         """Get analytics summary"""
-        query = db.query(Transaction).filter(Transaction.is_transfer == False, Transaction.is_duplicate == False)
-        query = TransactionService._apply_filters(query, account_id, date_from, date_to)
+        filters = dict(
+            account_id=account_id,
+            date_from=date_from,
+            date_to=date_to,
+            category_keys=category_keys,
+            merchant_names=merchant_names,
+        )
 
-        transactions = query.all()
-        
-        total = len(transactions)
-        income = sum(t.amount for t in transactions if t.amount > 0)
-        expenses = sum(abs(t.amount) for t in transactions if t.amount < 0)
-        average = sum(t.amount for t in transactions) / total if total > 0 else 0
-        
-        categories = set()
-        for t in transactions:
-            if t.category_final:
-                categories.add(t.category_final)
-            elif t.category_predicted:
-                categories.add(t.category_predicted)
-        
+        total, income, expenses, net = TransactionService._analytics_query(
+            db,
+            func.count(Transaction.id),
+            _SQL_INCOME_SUM,
+            _SQL_EXPENSE_SUM,
+            func.sum(Transaction.amount),
+            **filters,
+        ).one()
+
+        total = total or 0
+        # A row with neither a final nor a predicted category contributes no
+        # entry here - "uncategorized" is a display fallback, not a category
+        # the user has actually used.
+        categories = [
+            key
+            for (key,) in TransactionService._analytics_query(db, _SQL_CATEGORY_OR_NULL, **filters)
+            .filter(_SQL_CATEGORY_OR_NULL.isnot(None))
+            .distinct()
+            .all()
+        ]
+
         return {
             "total_transactions": total,
-            "total_income": income,
-            "total_expenses": expenses,
-            "average_transaction": average,
-            "categories_used": list(categories),
+            "total_income": float(income or 0.0),
+            "total_expenses": float(expenses or 0.0),
+            "average_transaction": (float(net or 0.0) / total) if total > 0 else 0,
+            "categories_used": categories,
             "total_transferred": TransactionService._get_total_transferred(db, account_id, date_from, date_to),
         }
 
@@ -616,21 +712,31 @@ class TransactionService:
 
         # Only the outgoing (negative) leg is summed, so each transfer pair
         # is counted once even though both legs are stored as separate rows.
-        query = db.query(Transaction).filter(
+        query = db.query(Transaction.amount, Transaction.transfer_match_id).filter(
             Transaction.is_transfer == True,
             Transaction.account_id.in_(account_ids),
             Transaction.amount < 0,
+            Transaction.transfer_match_id.isnot(None),
         )
         query = TransactionService._apply_filters(query, None, date_from, date_to)
         outgoing = query.all()
+        if not outgoing:
+            return 0.0
 
-        total = 0.0
-        for t in outgoing:
-            match = db.query(Transaction).filter(Transaction.id == t.transfer_match_id).first()
-            if match and match.account_id in account_ids:
-                total += abs(t.amount)
-        return total
+        # One batched lookup for every counterpart leg rather than a query per
+        # row - same pattern as _attach_transfer_pair_accounts.
+        match_ids = {match_id for _, match_id in outgoing}
+        matched_accounts = dict(
+            db.query(Transaction.id, Transaction.account_id)
+            .filter(Transaction.id.in_(match_ids))
+            .all()
+        )
 
+        return sum(
+            abs(amount)
+            for amount, match_id in outgoing
+            if matched_accounts.get(match_id) in account_ids
+        )
 
     @staticmethod
     def get_category_breakdown(
@@ -639,48 +745,321 @@ class TransactionService:
         date_from: str = None,
         date_to: str = None,
         group_by: str = "category",
+        category_level: str = "leaf",
+        category_keys: list[str] = None,
+        merchant_names: list[str] = None,
     ):
         """Get breakdown by category, merchant, or account"""
-        query = db.query(Transaction).filter(Transaction.is_transfer == False, Transaction.is_duplicate == False)
-        query = TransactionService._apply_filters(query, account_id, date_from, date_to)
+        if group_by == "merchant":
+            # A merchant that is NULL *or* empty reads as "Unknown".
+            key_expr = case(
+                (or_(Transaction.merchant.is_(None), Transaction.merchant == ""), "Unknown"),
+                else_=Transaction.merchant,
+            )
+        elif group_by == "account":
+            key_expr = func.coalesce(Account.name, "Unknown")
+        else:
+            key_expr = _SQL_CATEGORY_KEY
 
-        transactions = query.all()
+        query = TransactionService._analytics_query(
+            db,
+            key_expr,
+            func.count(Transaction.id),
+            func.sum(Transaction.amount),
+            account_id=account_id,
+            date_from=date_from,
+            date_to=date_to,
+            category_keys=category_keys,
+            merchant_names=merchant_names,
+        )
+        if group_by == "account":
+            # Outer join so a row whose account row is missing still shows up
+            # under "Unknown" instead of dropping out of the breakdown.
+            query = query.outerjoin(Account, Transaction.account_id == Account.id)
+
+        rows = query.group_by(key_expr).all()
+
+        # The parent rollup folds the already-grouped rows (a handful, not the
+        # whole table) rather than joining Category in SQL - a main and a leaf
+        # are allowed to share a key, so a key-based join isn't safe.
+        parent_lookup = (
+            TransactionService._build_parent_category_lookup(db)
+            if group_by == "category" and category_level == "parent"
+            else {}
+        )
+
         breakdown = {}
-
-        for t in transactions:
-            if group_by == "merchant":
-                key = t.merchant or "Unknown"
-            elif group_by == "account":
-                key = t.account.name if t.account else "Unknown"
-            else:
-                key = t.category_final or t.category_predicted or "uncategorized"
-
-            if key not in breakdown:
-                breakdown[key] = {"count": 0, "total": 0}
-            breakdown[key]["count"] += 1
-            breakdown[key]["total"] += t.amount
+        for key, count, total in rows:
+            key = parent_lookup.get(key, key)
+            entry = breakdown.setdefault(key, {"count": 0, "total": 0})
+            entry["count"] += count
+            entry["total"] += float(total or 0.0)
 
         return breakdown
 
     @staticmethod
     def get_monthly_trends(
-        db: Session, account_id: str = None, date_from: str = None, date_to: str = None
+        db: Session,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+        category_keys: list[str] = None,
+        merchant_names: list[str] = None,
     ):
         """Get monthly income/expense trends"""
-        query = db.query(Transaction).filter(Transaction.is_transfer == False, Transaction.is_duplicate == False)
-        query = TransactionService._apply_filters(query, account_id, date_from, date_to)
+        rows = (
+            TransactionService._analytics_query(
+                db,
+                _SQL_MONTH,
+                _SQL_INCOME_SUM,
+                _SQL_EXPENSE_SUM,
+                account_id=account_id,
+                date_from=date_from,
+                date_to=date_to,
+                category_keys=category_keys,
+                merchant_names=merchant_names,
+            )
+            .group_by(_SQL_MONTH)
+            .order_by(_SQL_MONTH)
+            .all()
+        )
 
-        transactions = query.all()
-        trends = {}
-        
-        for t in transactions:
-            month = t.date[:7]  # YYYY-MM
-            if month not in trends:
-                trends[month] = {"income": 0, "expenses": 0}
-            
-            if t.amount > 0:
-                trends[month]["income"] += t.amount
-            else:
-                trends[month]["expenses"] += abs(t.amount)
-        
-        return dict(sorted(trends.items()))
+        return {
+            month: {"income": float(income or 0.0), "expenses": float(expenses or 0.0)}
+            for month, income, expenses in rows
+        }
+
+    @staticmethod
+    def get_stacked_monthly_trends(
+        db: Session,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+        category_level: str = "leaf",
+        category_keys: list[str] = None,
+        merchant_names: list[str] = None,
+    ):
+        """Get monthly trends split by category and sign for stacked charts."""
+        # Grouping by the sign bucket (rather than summing both signs per
+        # category) keeps a category out of the "income" map entirely when it
+        # only ever had expenses that month, instead of emitting a 0.0 series.
+        rows = (
+            TransactionService._analytics_query(
+                db,
+                _SQL_MONTH,
+                _SQL_CATEGORY_KEY,
+                _SQL_SIGN_BUCKET,
+                func.sum(func.abs(Transaction.amount)),
+                account_id=account_id,
+                date_from=date_from,
+                date_to=date_to,
+                category_keys=category_keys,
+                merchant_names=merchant_names,
+            )
+            .group_by(_SQL_MONTH, _SQL_CATEGORY_KEY, _SQL_SIGN_BUCKET)
+            .order_by(_SQL_MONTH)
+            .all()
+        )
+
+        parent_lookup = (
+            TransactionService._build_parent_category_lookup(db) if category_level == "parent" else {}
+        )
+
+        trends: dict[str, dict[str, dict[str, float]]] = {}
+        for month, raw_category, bucket, total in rows:
+            category_key = parent_lookup.get(raw_category, raw_category)
+            month_entry = trends.setdefault(month, {"income": {}, "expenses": {}})
+            month_entry[bucket][category_key] = month_entry[bucket].get(category_key, 0.0) + float(total or 0.0)
+
+        return trends
+
+    @staticmethod
+    def get_transfer_analytics(
+        db: Session,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+    ):
+        """Money moved between the family's own accounts, per month and per
+        route. Every other analytics aggregate deliberately excludes transfers
+        (so one movement isn't counted as both income and expense) - this is
+        the one place that reports on them.
+
+        Only the outgoing leg of a matched pair is counted, so a transfer that
+        exists as two rows is reported once, and its direction is unambiguous."""
+        outgoing = db.query(Transaction).filter(
+            Transaction.is_transfer == True,
+            Transaction.amount < 0,
+        )
+        outgoing = TransactionService._apply_filters(outgoing, account_id, date_from, date_to)
+
+        monthly_rows = (
+            outgoing.with_entities(
+                _SQL_MONTH,
+                func.sum(func.abs(Transaction.amount)),
+                func.count(Transaction.id),
+            )
+            .group_by(_SQL_MONTH)
+            .order_by(_SQL_MONTH)
+            .all()
+        )
+        monthly = {
+            month: {"amount": float(amount or 0.0), "count": count}
+            for month, amount, count in monthly_rows
+        }
+
+        # Matched pairs: join the counterpart row to learn the destination
+        # account in SQL rather than one lookup per transfer.
+        counterpart = aliased(Transaction)
+        source_account = aliased(Account)
+        target_account = aliased(Account)
+        matched_q = (
+            db.query(
+                source_account.name,
+                target_account.name,
+                func.sum(func.abs(Transaction.amount)),
+                func.count(Transaction.id),
+            )
+            .join(counterpart, Transaction.transfer_match_id == counterpart.id)
+            .join(source_account, Transaction.account_id == source_account.id)
+            .join(target_account, counterpart.account_id == target_account.id)
+            .filter(Transaction.is_transfer == True, Transaction.amount < 0)
+        )
+        matched_q = TransactionService._apply_filters(matched_q, account_id, date_from, date_to)
+        # Keyed by route so the two halves of a one-sided pair (the outgoing
+        # row on one account and the incoming row on the other) collapse into
+        # the single route they describe instead of being reported twice.
+        by_route: dict[tuple, dict] = {}
+
+        def _add_flow(from_account: str, to_account: str, amount: float, count: int, matched: bool) -> None:
+            key = (from_account or "Unknown", to_account or "Unknown", matched)
+            entry = by_route.setdefault(
+                key,
+                {"from_account": key[0], "to_account": key[1], "amount": 0.0, "count": 0, "matched": matched},
+            )
+            entry["amount"] += float(amount or 0.0)
+            entry["count"] += count
+
+        for src, dst, amount, count in matched_q.group_by(source_account.name, target_account.name).all():
+            _add_flow(src, dst, amount, count, True)
+
+        # One-sided transfers: the user named the other account but no
+        # counterpart row exists (e.g. a top-up funded from outside the
+        # tracked accounts). Direction follows the sign.
+        declared_account = aliased(Account)
+        own_account = aliased(Account)
+        one_sided_q = (
+            db.query(
+                own_account.name,
+                declared_account.name,
+                Transaction.amount < 0,
+                func.sum(func.abs(Transaction.amount)),
+                func.count(Transaction.id),
+            )
+            .join(own_account, Transaction.account_id == own_account.id)
+            .join(declared_account, Transaction.transfer_account_id == declared_account.id)
+            .filter(
+                Transaction.is_transfer == True,
+                Transaction.transfer_match_id.is_(None),
+                Transaction.transfer_account_id.isnot(None),
+            )
+        )
+        one_sided_q = TransactionService._apply_filters(one_sided_q, account_id, date_from, date_to)
+        for own, declared, is_outgoing, amount, count in one_sided_q.group_by(
+            own_account.name, declared_account.name, Transaction.amount < 0
+        ).all():
+            _add_flow(
+                own if is_outgoing else declared,
+                declared if is_outgoing else own,
+                amount,
+                count,
+                False,
+            )
+
+        flows = sorted(by_route.values(), key=lambda f: f["amount"], reverse=True)
+        return {
+            "monthly": monthly,
+            "flows": flows,
+            "total_amount": sum(entry["amount"] for entry in monthly.values()),
+            "transfer_count": sum(entry["count"] for entry in monthly.values()),
+        }
+
+    @staticmethod
+    def get_recurring_charges(
+        db: Session,
+        account_id: str = None,
+        date_from: str = None,
+        date_to: str = None,
+        min_months: int = 3,
+    ):
+        """Merchants that look like a subscription or standing cost: charged
+        in at least `min_months` distinct months, roughly once a month, and
+        for a consistent amount.
+
+        Consistency is measured as (max - min) / average rather than a real
+        standard deviation because SQLite (used by the tests) has no stddev
+        aggregate, and over a bounded window the two agree closely enough for
+        ranking. Callers are expected to pass a trailing window - across many
+        years a subscription's price rises and the spread stops being a useful
+        signal. With no window given, a trailing 12 months ending at the most
+        recent transaction is used - anchoring on the data rather than on today
+        keeps the result meaningful when imports lag behind the calendar."""
+        if not date_from and not date_to:
+            latest = db.query(func.max(Transaction.date)).scalar()
+            if not latest:
+                return []
+            date_to = latest
+            year, month = int(latest[:4]), int(latest[5:7])
+            date_from = f"{year - 1:04d}-{month:02d}-01"
+
+        rows = (
+            db.query(
+                Transaction.merchant,
+                func.count(func.distinct(_SQL_MONTH)),
+                func.count(Transaction.id),
+                func.sum(func.abs(Transaction.amount)),
+                func.avg(func.abs(Transaction.amount)),
+                func.min(func.abs(Transaction.amount)),
+                func.max(func.abs(Transaction.amount)),
+                func.max(Transaction.date),
+            )
+            .filter(
+                Transaction.is_transfer == False,
+                Transaction.is_duplicate == False,
+                Transaction.amount < 0,
+                Transaction.merchant.isnot(None),
+                Transaction.merchant != "",
+            )
+        )
+        rows = TransactionService._apply_filters(rows, account_id, date_from, date_to)
+        rows = (
+            rows.group_by(Transaction.merchant)
+            .having(func.count(func.distinct(_SQL_MONTH)) >= min_months)
+            .all()
+        )
+
+        charges = []
+        for merchant, months, count, total, average, low, high, last_date in rows:
+            months = months or 0
+            average = float(average or 0.0)
+            if months <= 0 or average <= 0:
+                continue
+            per_month = count / months
+            spread = (float(high or 0.0) - float(low or 0.0)) / average
+            # ~1 charge a month with a stable amount. Anything lumpier is
+            # ordinary shopping at a favourite merchant, not a standing cost.
+            if not (0.7 <= per_month <= 1.4) or spread > 0.35:
+                continue
+            charges.append({
+                "merchant": merchant,
+                "months_active": months,
+                "charge_count": count,
+                "total_amount": float(total or 0.0),
+                "average_amount": average,
+                "last_date": last_date,
+                "amount_spread": round(spread, 4),
+                "annualized_amount": average * 12,
+            })
+
+        charges.sort(key=lambda c: c["annualized_amount"], reverse=True)
+        return charges

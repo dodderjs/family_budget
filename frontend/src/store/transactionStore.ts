@@ -29,7 +29,7 @@ export const useTransactionStore = create<TransactionStore>((set) => ({
   categories: [],
   categoriesLoading: false,
   selectedAccountIds: [],
-  datePreset: 'all',
+  datePreset: 'this_year',
   customDateFrom: null,
   customDateTo: null,
   error: null,

@@ -32,6 +32,12 @@ services:
       DATABASE_URL: mysql+pymysql://budget_user:budget_password@mariadb:3306/family_budget
       PYTHONUNBUFFERED: 1
       DEBUG: 1
+      # The source lives on a Windows drive bind-mounted into WSL2, so watchfiles
+      # force-polls instead of using inotify (same reason vite.config.ts sets
+      # usePolling). Every stat is a 9p round-trip needing a 64KB contiguous
+      # kernel buffer; at the 300ms default those allocations fail under memory
+      # pressure and the reloader dies, taking the API down with it.
+      WATCHFILES_POLL_DELAY_MS: 1000
     ports:
       - "8000:8000"
       - "5678:5678"

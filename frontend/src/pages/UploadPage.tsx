@@ -1,13 +1,32 @@
-import { Alert, Badge, Button, Card, Container, FileInput, Group, Modal, PasswordInput, ScrollArea, Select, SimpleGrid, Stack, Table, Tabs, TagsInput, Text, TextInput, Title } from '@mantine/core';
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Container,
+  MenuItem,
+  Stack,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tabs,
+  TextField,
+  Typography
+} from '@mui/material';
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { AccountForm } from '../components/AccountForm';
 import { accountFormService } from '../services/accountFormService';
 import { csvService } from '../services/csvService';
 import { Account, CsvRow, transactionService } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
 
-// Tolerant lookup: CSV headers can carry stray whitespace/casing depending on
-// which parser produced the row, so match loosely if an exact key miss.
 const getFieldValue = (row: Record<string, any> | undefined, field: string | null | undefined): string => {
   if (!row || !field) return '';
   if (field in row) return String(row[field] ?? '').trim();
@@ -34,26 +53,16 @@ interface QueuedFile {
 
 let nextQueueId = 0;
 const makeQueueId = () => `qf-${Date.now()}-${nextQueueId++}`;
+const defaultTab = 'upload';
 
 export const UploadPage: React.FC = () => {
+  const location = useLocation();
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [decidingFileId, setDecidingFileId] = useState<string | null>(null);
   const [previewFileId, setPreviewFileId] = useState<string | null>(null);
-  const [filesValue, setFilesValue] = useState<File[]>([]);
-  const [activeTab, setActiveTab] = useState<string | null>('upload');
+  const [activeTab, setActiveTab] = useState<string>(defaultTab);
   const [processingAll, setProcessingAll] = useState(false);
-  const [message, setMessage] = useState<{type: 'success'|'error'|'info', text: string} | null>(null);
-
-  // Account add/edit form state (shared modal for both flows)
-  const [showAddAccountModal, setShowAddAccountModal] = useState(false);
-  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
-  const [newAccountName, setNewAccountName] = useState('');
-  const [newAccountNumber, setNewAccountNumber] = useState('');
-  const [newAccountType, setNewAccountType] = useState('');
-  const [cardNumbers, setCardNumbers] = useState<string[]>([]);
-  const [accountNumberError, setAccountNumberError] = useState('');
-  const [creatingAccount, setCreatingAccount] = useState(false);
-  const [useExistingAccountId, setUseExistingAccountId] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
   const {
     accounts,
@@ -62,67 +71,31 @@ export const UploadPage: React.FC = () => {
     loadAccounts,
   } = useTransactionStore();
 
+  const [accountDialog, setAccountDialog] = useState<{
+    open: boolean;
+    id?: string;
+    name?: string;
+    number?: string;
+    type?: string|null;
+    cards?: string[];
+  }>({ open: false});  
+
+
   const navigate = useNavigate();
+
+  React.useEffect(() => {
+    setActiveTab(location.pathname === '/accounts' ? 'accounts' : 'upload');
+  }, [location.pathname]);
 
   const updateQueueItem = (id: string, patch: Partial<QueuedFile>) => {
     setQueue((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)));
   };
 
-  const validateAccountNumber = (value: string): boolean => {
-    const result = accountFormService.validateAccountNumber(value);
-    setAccountNumberError(result.error);
-    return result.valid;
-  };
-
   const openAddAccountDialog = (suggestedName: string, suggestedNumber: string) => {
-    setEditingAccountId(null);
-    setNewAccountName(suggestedName);
-    setNewAccountNumber(suggestedNumber);
-    setNewAccountType('');
-    setCardNumbers([]);
-    setAccountNumberError('');
-    setUseExistingAccountId(null);
-    setShowAddAccountModal(true);
+    setAccountDialog({ open: true, name: suggestedName, number: suggestedNumber });
   };
 
-  const openEditAccountDialog = (acc: Account) => {
-    setDecidingFileId(null);
-    setEditingAccountId(acc.id);
-    setNewAccountName(acc.name);
-    setNewAccountNumber(acc.account_number);
-    setNewAccountType(acc.type || '');
-    setCardNumbers(acc.cards.map((c) => c.card_number));
-    setAccountNumberError('');
-    setUseExistingAccountId(null);
-    setShowAddAccountModal(true);
-  };
 
-  const closeAddAccountModal = () => {
-    setShowAddAccountModal(false);
-    setDecidingFileId(null);
-  };
-
-  const handleDeleteAccount = async (acc: Account, force = false) => {
-    try {
-      await transactionService.deleteAccount(acc.id, force);
-      await loadAccounts();
-      setMessage({ type: 'success', text: `Account "${acc.name}" deleted${force ? ' along with its transactions' : ''}` });
-    } catch (err: any) {
-      if (err.response?.status === 409) {
-        const detail = err.response?.data?.detail || 'This account has existing transactions.';
-        if (window.confirm(`${detail}\n\nDelete the account and those transactions?`)) {
-          await handleDeleteAccount(acc, true);
-        }
-      } else {
-        setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to delete account' });
-      }
-    }
-  };
-
-  // Resolves any still-undecided queued file whose detected account number
-  // now matches something in `allAccounts` - so creating or picking an
-  // account for one file also resolves other pending files for that same
-  // account, instead of asking the user again for each one.
   const tryAutoResolvePendingFiles = (allAccounts: Account[]) => {
     setQueue((prev) =>
       prev.map((f) => {
@@ -165,7 +138,6 @@ export const UploadPage: React.FC = () => {
       setQueue((prev) => [...prev, { id, file, status: 'detecting' }]);
       detectQueuedFile(id, file);
     }
-    setFilesValue([]); // reset so the same file(s) can be re-selected later if needed
   };
 
   const removeQueuedFile = (id: string) => {
@@ -222,377 +194,263 @@ export const UploadPage: React.FC = () => {
     }
   };
 
-  const handleSaveAccount = async () => {
-    if (!editingAccountId && useExistingAccountId) {
-      if (decidingFileId) {
-        handleAssignExistingAccount(decidingFileId, useExistingAccountId);
-      }
-      closeAddAccountModal();
-      return;
-    }
-
-    if (!newAccountName.trim()) {
-      setMessage({ type: 'error', text: 'Please enter account name' });
-      return;
-    }
-
-    if (!validateAccountNumber(newAccountNumber)) {
-      return;
-    }
-
-    setCreatingAccount(true);
-    try {
-      if (editingAccountId) {
-        const response = await transactionService.updateAccount(editingAccountId, {
-          name: newAccountName,
-          account_number: newAccountNumber,
-          type: newAccountType.trim() || null,
-        });
-        const existingCards = accounts.find((a) => a.id === editingAccountId)?.cards || [];
-        await accountFormService.syncCards(editingAccountId, existingCards, cardNumbers);
-        setMessage({ type: 'success', text: `Account "${response.data.name}" updated` });
-        setShowAddAccountModal(false);
-        await loadAccounts();
-      } else {
-        const response = await transactionService.createAccount(
-          newAccountName,
-          newAccountNumber,
-          newAccountType.trim() || undefined
-        );
-        await accountFormService.syncCards(response.data.id, [], cardNumbers);
-        setMessage({ type: 'success', text: `Account "${response.data.name}" created` });
-        setShowAddAccountModal(false);
+  const onSuccessAddAccount = async (acc: Account) => {
         await loadAccounts();
         if (decidingFileId) {
-          updateQueueItem(decidingFileId, { accountId: response.data.id, status: 'ready' });
+          updateQueueItem(decidingFileId, { accountId: acc.id, status: 'ready' });
         }
         tryAutoResolvePendingFiles(useTransactionStore.getState().accounts);
-      }
-      setNewAccountName('');
-      setNewAccountNumber('');
-      setNewAccountType('');
-      setCardNumbers([]);
-      setEditingAccountId(null);
-      setDecidingFileId(null);
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.response?.data?.detail || 'Failed to save account' });
-    } finally {
-      setCreatingAccount(false);
-    }
-  };
+  }
 
   const readyCount = queue.filter((f) => f.status === 'ready').length;
   const previewableFiles = queue.filter((f) => f.rows);
   const previewFile = queue.find((f) => f.id === previewFileId) || previewableFiles[0];
+  const accountCount = accounts.length;
+  const cardsCount = accounts.reduce((sum, account) => sum + account.cards.length, 0);
+  const detectedCount = queue.filter((f) => f.status !== 'detecting').length;
+  const processedCount = queue.filter((f) => f.status === 'done').length;
 
   const statusBadge = (f: QueuedFile) => {
     switch (f.status) {
       case 'detecting':
-        return <Badge color="gray">Detecting...</Badge>;
+        return <Chip size="small" color="default" label="Detecting..." />;
       case 'ready':
-        return <Badge color="blue">Ready</Badge>;
+        return <Chip size="small" color="primary" label="Ready" />;
       case 'needs-account':
-        return <Badge color="orange">Needs account</Badge>;
+        return <Chip size="small" color="warning" label="Needs account" />;
       case 'processing':
-        return <Badge color="yellow">Processing...</Badge>;
+        return <Chip size="small" color="warning" label="Processing..." />;
       case 'done':
-        return <Badge color="green">Done</Badge>;
+        return <Chip size="small" color="success" label="Done" />;
       case 'error':
-        return <Badge color="red">Error</Badge>;
+        return <Chip size="small" color="error" label="Error" />;
+      default:
+        return null;
     }
   };
 
   return (
-    <Container size="lg" py="xl">
-      <Stack gap="lg">
-        <div>
-          <h1>Upload Transactions</h1>
-          <p>Upload one or more CSV files with your transaction history</p>
-        </div>
+    <Container maxWidth="xl" sx={{ py: { xs: 2, md: 3 } }}>
+      <Stack spacing={3}>
+
+        <Box
+          sx={{
+            display: 'grid',
+            gap: 2,
+            gridTemplateColumns: {
+              xs: '1fr',
+              sm: 'repeat(2, minmax(0, 1fr))',
+              lg: 'repeat(4, minmax(0, 1fr))',
+            },
+          }}
+        >
+          <Card variant="outlined">
+            <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+              <Typography variant="overline" color="text.secondary">Tracked accounts</Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>{accountCount}</Typography>
+              <Typography variant="caption" color="text.secondary">Accounts available for upload routing</Typography>
+            </CardContent>
+          </Card>
+          <Card variant="outlined">
+            <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+              <Typography variant="overline" color="text.secondary">Stored card hints</Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>{cardsCount}</Typography>
+              <Typography variant="caption" color="text.secondary">Card values used for matching edge cases</Typography>
+            </CardContent>
+          </Card>
+          <Card variant="outlined">
+            <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+              <Typography variant="overline" color="text.secondary">Detected files</Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>{detectedCount}</Typography>
+              <Typography variant="caption" color="text.secondary">CSV files parsed and classified</Typography>
+            </CardContent>
+          </Card>
+          <Card variant="outlined">
+            <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+              <Typography variant="overline" color="text.secondary">Processed files</Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>{processedCount}</Typography>
+              <Typography variant="caption" color="text.secondary">Files normalized and sent to review</Typography>
+            </CardContent>
+          </Card>
+        </Box>
 
         {message && (
-          <Alert color={message.type === 'error' ? 'red' : message.type === 'success' ? 'green' : 'blue'}>
+          <Alert severity={message.type === 'error' ? 'error' : message.type === 'success' ? 'success' : 'info'}>
             {message.text}
           </Alert>
         )}
 
-        <Modal
-          opened={showAddAccountModal}
-          onClose={closeAddAccountModal}
-          title={editingAccountId ? 'Edit account' : 'New account detected'}
-          size="sm"
-        >
-          <Stack gap="md">
-            {!editingAccountId && (
-              <Text size="sm" c="dimmed">
-                We couldn't match this file to an existing account. Confirm the details below to add it, or pick an
-                existing account instead.
-              </Text>
-            )}
-            <TextInput
-              label="Account Name"
-              placeholder="e.g., Checking, Savings, Business"
-              value={newAccountName}
-              onChange={(e) => {
-                setNewAccountName(e.currentTarget.value);
-                setUseExistingAccountId(null);
-              }}
-            />
-            <PasswordInput
-              label="Account Number"
-              placeholder="e.g., ****1234 or 1234567890"
-              description="Enter full or masked account number (at least 4 characters)"
-              value={newAccountNumber}
-              onChange={(e) => {
-                setNewAccountNumber(e.currentTarget.value);
-                setUseExistingAccountId(null);
-                validateAccountNumber(e.currentTarget.value);
-              }}
-              error={accountNumberError || false}
-            />
-            <TextInput
-              label="Account Type (optional)"
-              placeholder="e.g., Checking, Savings, Credit, Debit, Curve"
-              value={newAccountType}
-              onChange={(e) => setNewAccountType(e.currentTarget.value)}
-            />
-            <TagsInput
-              label="Card Numbers (optional)"
-              description="Last 4 digits or a full/masked number. Keep old ones here if a card was replaced - past transactions still need to match them (e.g. for Curve)."
-              placeholder="e.g. 9948 - press Enter to add"
-              value={cardNumbers}
-              onChange={setCardNumbers}
-            />
-            {!editingAccountId && decidingFileId && accounts.length > 0 && (
-              <Select
-                label="Or use an existing account"
-                placeholder="Choose an existing account"
-                data={accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.account_number})` }))}
-                value={useExistingAccountId}
-                onChange={setUseExistingAccountId}
-                clearable
-              />
-            )}
-            <Group justify="flex-end">
-              <Button variant="default" onClick={closeAddAccountModal}>
-                Cancel
-              </Button>
-              <Button
-                onClick={handleSaveAccount}
-                loading={creatingAccount}
-                disabled={!useExistingAccountId && !accountFormService.isAccountFormValid(newAccountName, newAccountNumber)}
-              >
-                {editingAccountId ? 'Save Changes' : useExistingAccountId ? 'Use This Account' : 'Create Account'}
-              </Button>
-            </Group>
-          </Stack>
-        </Modal>
-
-        <Tabs value={activeTab} onChange={setActiveTab}>
-          <Tabs.List>
-            <Tabs.Tab value="upload">Upload CSV</Tabs.Tab>
-            <Tabs.Tab value="accounts">Accounts</Tabs.Tab>
-            <Tabs.Tab value="preview" disabled={previewableFiles.length === 0}>Preview</Tabs.Tab>
-          </Tabs.List>
-
-          <Tabs.Panel value="upload" pt="lg">
-            <Stack gap="md">
-              <FileInput
-                label="Select CSV File(s)"
-                placeholder="Choose file(s)"
-                value={filesValue}
-                onChange={handleFilesChange}
+        <AccountForm {...accountDialog} onSuccess={onSuccessAddAccount} onCancel={() => setAccountDialog({ open: false })} onMessage={setMessage} />
+        
+        <Tabs value={activeTab} onChange={(_, value) => setActiveTab(value)} sx={{ mt: 0.5 }}>
+          <Tab label="Upload CSV" value="upload" />
+          <Tab label="Preview" value="preview" disabled={previewableFiles.length === 0} />
+        </Tabs>
+        {activeTab === 'upload' && (
+          <Stack spacing={2}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} sx={{ justifyContent: 'space-between', alignItems: { xs: 'stretch', sm: 'center' }, gap: 1 }}>
+              <Button component="label" variant="contained" sx={{ alignSelf: 'flex-start' }}>
+              Select CSV file(s)
+              <input
+                hidden
+                type="file"
                 accept=".csv"
                 multiple
-                clearable
+                onChange={(event) => {
+                  const selectedFiles = Array.from(event.target.files || []);
+                  handleFilesChange(selectedFiles);
+                  event.currentTarget.value = '';
+                }}
               />
-
-              {queue.length > 0 && (
-                <ScrollArea>
-                  <Table striped highlightOnHover withTableBorder verticalSpacing="sm">
-                    <Table.Thead>
-                      <Table.Tr>
-                        <Table.Th>File</Table.Th>
-                        <Table.Th>Format</Table.Th>
-                        <Table.Th>Rows</Table.Th>
-                        <Table.Th>Account</Table.Th>
-                        <Table.Th>Status</Table.Th>
-                        <Table.Th></Table.Th>
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {queue.map((f) => (
-                        <Table.Tr key={f.id}>
-                          <Table.Td>{f.file.name}</Table.Td>
-                          <Table.Td>{f.bankFormat ? <Badge variant="light">{f.bankFormat}</Badge> : '-'}</Table.Td>
-                          <Table.Td>{f.rowCount ?? '-'}</Table.Td>
-                          <Table.Td>
-                            {f.status === 'needs-account' ? (
-                              <Group gap={4} wrap="nowrap">
-                                <Select
-                                  placeholder="Choose account"
-                                  size="xs"
-                                  data={accounts.map((a) => ({ value: a.id, label: a.name }))}
-                                  onChange={(val) => val && handleAssignExistingAccount(f.id, val)}
-                                  style={{ width: 160 }}
-                                />
-                                <Button size="xs" variant="light" onClick={() => handleOpenAddAccountForFile(f)}>
-                                  + New
-                                </Button>
-                              </Group>
-                            ) : f.accountId ? (
-                              <Badge color="blue">{accounts.find((a) => a.id === f.accountId)?.name || 'Unknown'}</Badge>
-                            ) : (
-                              '-'
-                            )}
-                          </Table.Td>
-                          <Table.Td>
-                            {statusBadge(f)}
-                            {f.status === 'done' && f.resultText && (
-                              <Text size="xs" c="dimmed">{f.resultText}</Text>
-                            )}
-                            {f.status === 'error' && f.errorText && (
-                              <Text size="xs" c="red">{f.errorText}</Text>
-                            )}
-                          </Table.Td>
-                          <Table.Td>
-                            <Group gap={4} wrap="nowrap">
-                              {f.rows && (
-                                <Button
-                                  size="xs"
-                                  variant="subtle"
-                                  onClick={() => {
-                                    setPreviewFileId(f.id);
-                                    setActiveTab('preview');
-                                  }}
-                                >
-                                  Preview
-                                </Button>
-                              )}
-                              <Button
-                                size="xs"
-                                variant="subtle"
-                                color="red"
-                                disabled={f.status === 'processing'}
-                                onClick={() => removeQueuedFile(f.id)}
+              </Button>
+              <Typography variant="body2" color="text.secondary">
+                {queue.length > 0 ? `${queue.length} queued file(s)` : 'No files queued yet'}
+              </Typography>
+            </Stack>
+            {queue.length > 0 && (
+              <Card variant="outlined" sx={{ overflow: 'hidden' }}>
+                <TableContainer sx={{ overflowX: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ bgcolor: 'action.hover' }}>
+                      <TableCell>File</TableCell>
+                      <TableCell>Format</TableCell>
+                      <TableCell>Rows</TableCell>
+                      <TableCell>Account</TableCell>
+                      <TableCell>Status</TableCell>
+                      <TableCell />
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {queue.map((f) => (
+                      <TableRow key={f.id}>
+                        <TableCell>{f.file.name}</TableCell>
+                        <TableCell>{f.bankFormat ? <Chip size="small" variant="outlined" label={f.bankFormat} /> : '-'}</TableCell>
+                        <TableCell>{f.rowCount ?? '-'}</TableCell>
+                        <TableCell>
+                          {f.status === 'needs-account' ? (
+                            <Stack direction="row" spacing={0.5}>
+                              <TextField
+                                select
+                                size="small"
+                                sx={{ minWidth: 160 }}
+                                value=""
+                                onChange={(event) => event.target.value && handleAssignExistingAccount(f.id, event.target.value)}
                               >
-                                Remove
+                                <MenuItem value="">Choose account</MenuItem>
+                                {accounts.map((account) => (
+                                  <MenuItem key={account.id} value={account.id}>
+                                    {account.name}
+                                  </MenuItem>
+                                ))}
+                              </TextField>
+                              <Button size="small" variant="outlined" onClick={() => handleOpenAddAccountForFile(f)}>
+                                + New
                               </Button>
-                            </Group>
-                          </Table.Td>
-                        </Table.Tr>
-                      ))}
-                    </Table.Tbody>
-                  </Table>
-                </ScrollArea>
-              )}
-
-              <Group>
-                <Button onClick={handleProcessAll} loading={processingAll} disabled={readyCount === 0}>
-                  Process All Ready Files{readyCount > 0 ? ` (${readyCount})` : ''}
-                </Button>
-              </Group>
-            </Stack>
-          </Tabs.Panel>
-
-          <Tabs.Panel value="accounts" pt="lg">
-            <Stack gap="md">
-              <Group justify="space-between">
-                <Title order={3}>Your Accounts</Title>
-                <Button
-                  onClick={() => {
-                    setDecidingFileId(null);
-                    openAddAccountDialog('', '');
-                  }}
-                  variant="filled"
-                >
-                  + Add Account
-                </Button>
-              </Group>
-
-              {accounts.length === 0 ? (
-                <Alert color="yellow">
-                  No accounts yet. Create one to get started!
-                </Alert>
-              ) : (
-                <SimpleGrid cols={{ base: 1, sm: 2, lg: 3 }}>
-                  {accounts.map((acc) => (
-                    <Card key={acc.id} withBorder>
-                      <Group justify="space-between" wrap="nowrap" align="flex-start">
-                        <div>
-                          <Group gap="xs">
-                            <Text fw={600}>{acc.name}</Text>
-                            {acc.type && <Badge size="sm">{acc.type}</Badge>}
-                          </Group>
-                          <Text size="sm" c="dimmed" mt={4}>{acc.account_number}</Text>
-                          {acc.cards.length > 0 && (
-                            <Group gap={4} mt={4}>
-                              {acc.cards.map((c) => (
-                                <Badge key={c.id} size="xs" variant="outline" color="gray">{c.card_number}</Badge>
-                              ))}
-                            </Group>
+                            </Stack>
+                          ) : f.accountId ? (
+                            <Chip
+                              size="small"
+                              color="primary"
+                              label={accounts.find((account) => account.id === f.accountId)?.name || 'Unknown'}
+                            />
+                          ) : (
+                            '-'
                           )}
-                        </div>
-                        <Group gap={4} wrap="nowrap">
-                          <Button
-                            size="xs"
-                            variant="subtle"
-                            onClick={() => openEditAccountDialog(acc)}
-                          >
-                            Edit
-                          </Button>
-                          <Button
-                            size="xs"
-                            variant="subtle"
-                            color="red"
-                            onClick={() => handleDeleteAccount(acc)}
-                          >
-                            Delete
-                          </Button>
-                        </Group>
-                      </Group>
-                    </Card>
-                  ))}
-                </SimpleGrid>
-              )}
+                        </TableCell>
+                        <TableCell>
+                          {statusBadge(f)}
+                          {f.status === 'done' && f.resultText && (
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>{f.resultText}</Typography>
+                          )}
+                          {f.status === 'error' && f.errorText && (
+                            <Typography variant="caption" color="error" sx={{ display: 'block' }}>{f.errorText}</Typography>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Stack direction="row" spacing={0.5}>
+                            {f.rows && (
+                              <Button
+                                size="small"
+                                variant="text"
+                                onClick={() => {
+                                  setPreviewFileId(f.id);
+                                  setActiveTab('preview');
+                                }}
+                              >
+                                Preview
+                              </Button>
+                            )}
+                            <Button
+                              size="small"
+                              variant="text"
+                              color="error"
+                              disabled={f.status === 'processing'}
+                              onClick={() => removeQueuedFile(f.id)}
+                            >
+                              Remove
+                            </Button>
+                          </Stack>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                </TableContainer>
+              </Card>
+            )}
+            <Stack direction="row" sx={{ justifyContent: 'flex-end' }}>
+              <Button onClick={handleProcessAll} disabled={readyCount === 0 || processingAll} variant="contained">
+                {processingAll
+                  ? 'Processing...'
+                  : `Process All Ready Files${readyCount > 0 ? ` (${readyCount})` : ''}`}
+              </Button>
             </Stack>
-          </Tabs.Panel>
-
-          <Tabs.Panel value="preview" pt="lg">
-            <Stack gap="md">
-              {previewableFiles.length > 1 && (
-                <Select
-                  label="Previewing"
-                  data={previewableFiles.map((f) => ({ value: f.id, label: f.file.name }))}
-                  value={previewFile?.id || null}
-                  onChange={setPreviewFileId}
-                />
-              )}
-              {previewFile?.rows && previewFile.rows.length > 0 && (
-                <ScrollArea>
-                  <Table striped highlightOnHover withTableBorder>
-                    <Table.Thead>
-                      <Table.Tr>
-                        {Object.keys(previewFile.rows[0]).map(key => (
-                          <Table.Th key={key}>{key}</Table.Th>
-                        ))}
-                      </Table.Tr>
-                    </Table.Thead>
-                    <Table.Tbody>
-                      {previewFile.rows.slice(0, 5).map((row, i) => (
-                        <Table.Tr key={i}>
-                          {Object.values(row).map((val, j) => (
-                            <Table.Td key={j}>{String(val).substring(0, 30)}</Table.Td>
-                          ))}
-                        </Table.Tr>
+          </Stack>
+        )}
+        {activeTab === 'preview' && (
+          <Stack spacing={2}>
+            {previewableFiles.length > 1 && (
+              <TextField
+                select
+                label="Previewing"
+                value={previewFile?.id || ''}
+                onChange={(event) => setPreviewFileId(event.target.value || null)}
+                sx={{ maxWidth: 420 }}
+              >
+                {previewableFiles.map((f) => (
+                  <MenuItem key={f.id} value={f.id}>
+                    {f.file.name}
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
+            {previewFile?.rows && previewFile.rows.length > 0 && (
+              <Card variant="outlined" sx={{ overflow: 'hidden' }}>
+                <TableContainer sx={{ overflowX: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ bgcolor: 'action.hover' }}>
+                      {Object.keys(previewFile.rows[0]).map((key) => (
+                        <TableCell key={key}>{key}</TableCell>
                       ))}
-                    </Table.Tbody>
-                  </Table>
-                </ScrollArea>
-              )}
-            </Stack>
-          </Tabs.Panel>
-        </Tabs>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {previewFile.rows.slice(0, 5).map((row, i) => (
+                      <TableRow key={i}>
+                        {Object.values(row).map((val, j) => (
+                          <TableCell key={j}>{String(val).substring(0, 30)}</TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                </TableContainer>
+              </Card>
+            )}
+          </Stack>
+        )}
       </Stack>
     </Container>
   );

@@ -1,4 +1,4 @@
-import { Badge, Group, Text } from '@mantine/core';
+import { Chip, Stack, Typography } from '@mui/material';
 import React, { useEffect, useState } from 'react';
 import { Transaction, transactionService } from '../../services/transactionService';
 import { formatCurrency } from '../../utils/currency';
@@ -29,18 +29,18 @@ export const LinkedTransactionDetail: React.FC<DetailRendererProps> = ({ data })
     };
   }, [data.duplicate_of_id]);
 
-  if (failed) return <Text size="xs" c="red" p="sm">Failed to load linked transaction</Text>;
-  if (!linked) return <Text size="xs" c="dimmed" p="sm">Loading linked transaction...</Text>;
+  if (failed) return <Typography variant="caption" color="error" sx={{ p: 1 }}>Failed to load linked transaction</Typography>;
+  if (!linked) return <Typography variant="caption" color="text.secondary" sx={{ p: 1 }}>Loading linked transaction...</Typography>;
 
   return (
-    <Group gap="md" wrap="nowrap" p="sm">
-      <Badge color="grape" variant="light">Linked Curve transaction</Badge>
-      <Text size="sm">{linked.date}</Text>
-      <Text size="sm">{formatCurrency(linked.amount)}</Text>
-      <Text size="sm" style={{ flex: 1 }}>{linked.description}</Text>
-      <Text size="sm" c="dimmed">{linked.merchant || ''}</Text>
-      <Badge color="blue" variant="light" size="sm">Pred: {linked.category_predicted || 'N/A'}</Badge>
-      <Badge color="teal" variant="light" size="sm">Final: {linked.category_final || 'N/A'}</Badge>
-    </Group>
+    <Stack direction="row" spacing={2} sx={{ p: 1, alignItems: 'center', flexWrap: 'nowrap' }}>
+      <Chip color="secondary" label="Linked Curve transaction" size="small" variant="outlined" />
+      <Typography variant="body2">{linked.date}</Typography>
+      <Typography variant="body2">{formatCurrency(linked.amount)}</Typography>
+      <Typography variant="body2" sx={{ flex: 1 }}>{linked.description}</Typography>
+      <Typography variant="body2" color="text.secondary">{linked.merchant || ''}</Typography>
+      <Chip color="primary" label={`Pred: ${linked.category_predicted || 'N/A'}`} size="small" variant="outlined" />
+      <Chip color="success" label={`Final: ${linked.category_final || 'N/A'}`} size="small" variant="outlined" />
+    </Stack>
   );
 };

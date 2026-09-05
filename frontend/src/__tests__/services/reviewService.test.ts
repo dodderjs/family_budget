@@ -27,6 +27,7 @@ function sampleTransaction(overrides: Partial<Transaction> = {}): Transaction {
     currency: 'HUF',
     description: 'Coffee',
     merchant: 'Cafe',
+    type: null,
     hash_fingerprint: 'hash',
     category_predicted: 'dining',
     category_confidence: 0.8,

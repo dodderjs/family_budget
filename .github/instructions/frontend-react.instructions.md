@@ -6,7 +6,7 @@ applyTo: "frontend/src/**/*.tsx"
 
 # Frontend Development Standards
 
-React 18 + TypeScript + Vite + Mantine 7 + Zustand + AG Grid + Recharts.
+React 18 + TypeScript + Vite + Mantine 7 + Zustand + AG Grid + MUI X Charts.
 
 Use a strict layered structure: utility -> service -> page -> component.
 
@@ -90,7 +90,7 @@ Default test focus is logic and service layers. Visual tests are optional and ad
 
 ## Pages
 
-`UploadPage` (CSV upload, account selection, preview, normalize), `ReviewPage` (AG Grid of pending-category transactions, inline category correction → triggers `TrainingData` on the backend), `AnalyticsPage` (summary cards + Recharts).
+`UploadPage` (CSV upload, account selection, preview, normalize), `ReviewPage` (AG Grid of pending-category transactions, inline category correction → triggers `TrainingData` on the backend), `AnalyticsPage` (summary cards + MUI X Charts: PieChart, BarChart, LineChart).
 
 Keep pages as controllers:
 
@@ -117,7 +117,22 @@ When a page exceeds maintainable complexity, first extract logic to utility/serv
 
 ## Execution environment
 
-Docker-first is required for project operations unless there is a clear blocker.
+Docker-first is required for all project operations unless there is a clear blocker.
+
+**npm commands must run inside the frontend container, not on the host:**
+
+```bash
+# Install a package
+docker exec family-budget-frontend npm install <package>
+
+# Uninstall a package
+docker exec family-budget-frontend npm uninstall <package>
+
+# Run any npm script
+docker exec family-budget-frontend npm run <script>
+```
+
+Running npm directly on the host modifies `package.json` and `node_modules` outside the container's filesystem, which means the change won't be picked up by the running dev server and may produce inconsistent lock files.
 
 1. Start and use the compose stack for development and verification.
 2. Run installs, tests, and project commands inside containers whenever possible.

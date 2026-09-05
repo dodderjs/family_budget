@@ -1,4 +1,4 @@
-import { Button, Group, MultiSelect, Select, TextInput } from '@mantine/core';
+import { Autocomplete, Box, Button, MenuItem, Stack, TextField } from '@mui/material';
 import React from 'react';
 import { useTransactionStore } from '../store/transactionStore';
 import { DATE_RANGE_PRESETS, DateRangePreset } from '../utils/dateRange';
@@ -21,26 +21,32 @@ export const FilterBar: React.FC<FilterBarProps> = ({ showAccountFilter = true }
   } = useTransactionStore();
 
   const allSelected = accounts.length > 0 && selectedAccountIds.length === accounts.length;
+  const accountOptions = accounts.map((account) => ({ id: account.id, label: account.name }));
+  const selectedAccountOptions = accountOptions.filter((option) => selectedAccountIds.includes(option.id));
 
   return (
-    <Group align="flex-end" wrap="wrap">
+    <Stack direction="row" spacing={2} useFlexGap sx={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
       {showAccountFilter && (
         <>
-          <MultiSelect
-            label="Accounts"
-            placeholder="All accounts"
-            data={accounts.map((a) => ({ value: a.id, label: a.name }))}
-            value={selectedAccountIds}
-            onChange={setSelectedAccountIds}
-            clearable
-            searchable
-            w={280}
-            styles={{
-              pillsList: { flexWrap: 'nowrap', overflowX: 'auto' },
+          <Autocomplete
+            multiple
+            options={accountOptions}
+            getOptionLabel={(option) => option.label}
+            value={selectedAccountOptions}
+            onChange={(_, value) => setSelectedAccountIds(value.map((option) => option.id))}
+            isOptionEqualToValue={(option, value) => option.id === value.id}
+            sx={{
+              flex: '1 1 320px',
+              minWidth: 280,
+              maxWidth: 520,
+              '& .MuiAutocomplete-tag': {
+                maxWidth: 160,
+              },
             }}
+            renderInput={(params) => <TextField {...params} size="small" label="Accounts" placeholder="All accounts" />}
           />
           <Button
-            variant={allSelected ? 'filled' : 'default'}
+            variant={allSelected ? 'contained' : 'outlined'}
             onClick={() =>
               setSelectedAccountIds(allSelected ? [] : accounts.map((a) => a.id))
             }
@@ -50,30 +56,41 @@ export const FilterBar: React.FC<FilterBarProps> = ({ showAccountFilter = true }
           </Button>
         </>
       )}
-      <Select
+      <TextField
+        select
+        size="small"
         label="Period"
-        data={DATE_RANGE_PRESETS}
+        sx={{ minWidth: 200 }}
         value={datePreset}
-        onChange={(val) => setDatePreset((val as DateRangePreset) || 'all')}
-        allowDeselect={false}
-        w={200}
-      />
+        onChange={(event) => setDatePreset((event.target.value as DateRangePreset) || 'all')}
+      >
+        {DATE_RANGE_PRESETS.map((option) => (
+          <MenuItem key={option.value} value={option.value}>
+            {option.label}
+          </MenuItem>
+        ))}
+      </TextField>
       {datePreset === 'custom' && (
         <>
-          <TextInput
+          <TextField
             label="From"
             type="date"
+            size="small"
             value={customDateFrom || ''}
-            onChange={(e) => setCustomDateRange(e.currentTarget.value || null, customDateTo)}
+            onChange={(event) => setCustomDateRange(event.target.value || null, customDateTo)}
+            slotProps={{ inputLabel: { shrink: true } }}
           />
-          <TextInput
+          <TextField
             label="To"
             type="date"
+            size="small"
             value={customDateTo || ''}
-            onChange={(e) => setCustomDateRange(customDateFrom, e.currentTarget.value || null)}
+            onChange={(event) => setCustomDateRange(customDateFrom, event.target.value || null)}
+            slotProps={{ inputLabel: { shrink: true } }}
           />
         </>
       )}
-    </Group>
+      <Box sx={{ flexGrow: 1 }} />
+    </Stack>
   );
 };
