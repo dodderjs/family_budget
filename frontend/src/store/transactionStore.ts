@@ -29,7 +29,10 @@ export const useTransactionStore = create<TransactionStore>((set) => ({
   categories: [],
   categoriesLoading: false,
   selectedAccountIds: [],
-  datePreset: 'this_year',
+  // Year-to-date reads as empty once imports lag behind the calendar (e.g.
+  // no data yet for the new year) - a trailing window stays populated
+  // regardless of when the last upload happened.
+  datePreset: 'last_6_months',
   customDateFrom: null,
   customDateTo: null,
   error: null,

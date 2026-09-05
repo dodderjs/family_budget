@@ -20,16 +20,21 @@ import { formatCurrency } from '../../utils/currency';
 interface TransfersCardProps {
   transfers: TransferAnalytics;
   maxFlows?: number;
+  /** Every month in the selected period (see enumerateMonths) - without this
+   * the chart only shows months that actually had a transfer, which for a
+   * quiet period can collapse to a single bar. Falls back to the months
+   * transfers.monthly actually has when not given (e.g. the 'all' preset). */
+  months?: string[];
 }
 
 const TRANSFER_COLOR = '#8b5cf6';
 
-export const TransfersCard: React.FC<TransfersCardProps> = ({ transfers, maxFlows = 8 }) => {
-  const months = Object.keys(transfers.monthly).sort();
-  const amounts = months.map((m) => transfers.monthly[m].amount);
+export const TransfersCard: React.FC<TransfersCardProps> = ({ transfers, maxFlows = 8, months: monthsAxis }) => {
+  const months = monthsAxis && monthsAxis.length > 0 ? monthsAxis : Object.keys(transfers.monthly).sort();
+  const amounts = months.map((m) => transfers.monthly[m]?.amount || 0);
   const flows = transfers.flows.slice(0, maxFlows);
   const busiestMonth = months.reduce<{ month: string; amount: number } | null>((best, m) => {
-    const amount = transfers.monthly[m].amount;
+    const amount = transfers.monthly[m]?.amount || 0;
     return !best || amount > best.amount ? { month: m, amount } : best;
   }, null);
 

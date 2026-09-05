@@ -61,6 +61,23 @@ export function resolveDateRange(
   }
 }
 
+/** Every "YYYY-MM" in [from, to] inclusive. Returns [] when either bound is
+ * missing (the 'all' preset, or a not-yet-resolved previous period) - callers
+ * fall back to whatever months the data actually has instead of guessing an
+ * unbounded axis. Used to zero-fill monthly series so a chart's x-axis always
+ * spans the selected period, rather than only the months with transactions. */
+export function enumerateMonths(from: string | null, to: string | null): string[] {
+  if (!from || !to) return [];
+  const cursor = new Date(`${from.slice(0, 7)}-01`);
+  const end = new Date(`${to.slice(0, 7)}-01`);
+  const months: string[] = [];
+  while (cursor <= end) {
+    months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
 /** Shifts a resolved range back by its own length, for period-over-period comparison. */
 export function previousPeriod(range: ResolvedDateRange): ResolvedDateRange {
   if (!range.from || !range.to) return { from: null, to: null };

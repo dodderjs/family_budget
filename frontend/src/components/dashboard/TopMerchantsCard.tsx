@@ -1,5 +1,5 @@
-import { Box, Card, CardContent, Stack, Typography } from '@mui/material';
-import React from 'react';
+import { Box, Button, Card, CardContent, Stack, Typography } from '@mui/material';
+import React, { useState } from 'react';
 import { BreakdownEntry } from '../../services/analyticsService';
 import { formatCurrency } from '../../utils/currency';
 
@@ -9,18 +9,27 @@ interface TopMerchantsCardProps {
   maxRows?: number;
 }
 
+// Each "Show more" click steps to the next of these rather than revealing
+// everything at once - the full list can run into the hundreds of merchants.
+const ROW_STEPS = [8, 20, 50, 100];
+
 export const TopMerchantsCard: React.FC<TopMerchantsCardProps> = ({
   merchants,
   totalExpenses,
   maxRows = 8,
 }) => {
+  const [visibleCount, setVisibleCount] = useState(maxRows);
+
   // Net-positive merchants are income sources (an employer, a refund), not
   // places money went - they'd otherwise dominate this list and push the
   // share of spending over 100%.
   const spendOnly = merchants.filter((m) => m.total < 0);
-  const top = [...spendOnly].sort((a, b) => b.value - a.value).slice(0, maxRows);
+  const sorted = [...spendOnly].sort((a, b) => b.value - a.value);
+  const top = sorted.slice(0, visibleCount);
   const largest = top.length > 0 ? top[0].value : 0;
   const topShare = totalExpenses > 0 ? (top.reduce((s, m) => s + m.value, 0) / totalExpenses) * 100 : 0;
+  const nextStep = ROW_STEPS.find((step) => step > visibleCount);
+  const canShowMore = sorted.length > visibleCount;
 
   return (
     <Card variant="outlined">
@@ -66,6 +75,16 @@ export const TopMerchantsCard: React.FC<TopMerchantsCardProps> = ({
             </Box>
           ))}
         </Stack>
+
+        {canShowMore && (
+          <Button
+            size="small"
+            sx={{ mt: 1.5 }}
+            onClick={() => setVisibleCount(nextStep || sorted.length)}
+          >
+            Show more ({sorted.length - visibleCount} more)
+          </Button>
+        )}
       </CardContent>
     </Card>
   );

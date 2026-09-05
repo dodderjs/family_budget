@@ -1,6 +1,6 @@
 import { ResolvedDateRange } from '../utils/dateRange';
 import { AnalyticsDashboardData, analyticsService } from './analyticsService';
-import { RecurringCharge, TransferAnalytics, transactionService } from './transactionService';
+import { CategoryLevel, RecurringCharge, TransferAnalytics, transactionService } from './transactionService';
 
 export interface CoverageSummary {
   covered: number;
@@ -40,6 +40,7 @@ export const dashboardService = {
     accountId?: string | null;
     range: ResolvedDateRange;
     categoryKeys?: string;
+    categoryLevel?: CategoryLevel;
   }): Promise<DashboardHomeData> {
     // The account list and every account's coverage arrive together from the
     // batched endpoint. This used to be a /accounts call followed by one
@@ -49,6 +50,7 @@ export const dashboardService = {
         accountId: params.accountId,
         range: params.range,
         groupBy: 'category',
+        categoryLevel: params.categoryLevel,
         compare: true,
         categoryKeys: params.categoryKeys,
         // Feeds the top-merchants list. Cheap now the breakdown is a SQL

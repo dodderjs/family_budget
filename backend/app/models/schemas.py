@@ -135,8 +135,47 @@ class AccountCoverageResponse(BaseModel):
     last_date: Optional[str] = None
     months: list[CoverageMonthEntry] = []
 
+class AccountCoverageSummary(BaseModel):
+    account_id: str
+    account_name: str
+    account_type: Optional[str] = None
+    first_date: Optional[str] = None
+    last_date: Optional[str] = None
+    transaction_count: int
+    covered: int
+    gap: int
+    missing: int
+    dismissed: int
+
 class CoverageFlagUpdate(BaseModel):
     status: str  # missing | dismissed | gap
+
+class TransferFlow(BaseModel):
+    from_account: str
+    to_account: str
+    amount: float
+    count: int
+    matched: bool
+
+class TransferMonthEntry(BaseModel):
+    amount: float
+    count: int
+
+class TransferAnalytics(BaseModel):
+    monthly: dict[str, TransferMonthEntry]
+    flows: list[TransferFlow]
+    total_amount: float
+    transfer_count: int
+
+class RecurringCharge(BaseModel):
+    merchant: str
+    months_active: int
+    charge_count: int
+    total_amount: float
+    average_amount: float
+    last_date: str
+    amount_spread: float
+    annualized_amount: float
 
 class CategoryCreate(BaseModel):
     label: str

@@ -25,11 +25,12 @@ export const FilterBar: React.FC<FilterBarProps> = ({ showAccountFilter = true }
   const selectedAccountOptions = accountOptions.filter((option) => selectedAccountIds.includes(option.id));
 
   return (
-    <Stack direction="row" spacing={2} useFlexGap sx={{ alignItems: 'flex-end', flexWrap: 'wrap' }}>
+    <Stack direction="row" spacing={2} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
       {showAccountFilter && (
         <>
           <Autocomplete
             multiple
+            limitTags={2}
             options={accountOptions}
             getOptionLabel={(option) => option.label}
             value={selectedAccountOptions}
@@ -46,6 +47,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({ showAccountFilter = true }
             renderInput={(params) => <TextField {...params} size="small" label="Accounts" placeholder="All accounts" />}
           />
           <Button
+            size="small"
             variant={allSelected ? 'contained' : 'outlined'}
             onClick={() =>
               setSelectedAccountIds(allSelected ? [] : accounts.map((a) => a.id))

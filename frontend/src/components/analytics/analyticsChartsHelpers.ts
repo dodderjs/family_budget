@@ -1,6 +1,18 @@
 import { BreakdownEntry, TrendEntry } from '../../services/analyticsService';
 import { StackedMonthlyTrends } from '../../services/transactionService';
 
+/** Fades a "#rrggbb" color for the previous-period series - so it reads as a
+ * ghosted echo of its current-period counterpart instead of an identical,
+ * separately-legended color needing its own "Prev X" entry. */
+export const withAlpha = (hex: string, alpha: number): string => {
+  const clean = hex.replace('#', '');
+  const value = parseInt(clean, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
 export const MAX_BREAKDOWN_ITEMS = 10;
 export const MAX_STACK_CATEGORIES = 8;
 export const OTHER_INCOME_LABEL = 'Other Income';
@@ -70,9 +82,15 @@ export const buildStackedBarData = (
   previous: StackedMonthlyTrends | null,
   colors: string[],
   formatValue: (v: number) => string,
+  // Dense per-period axes (see enumerateMonths) so current and previous are
+  // each read at their own offset - a 1-month current period next to an
+  // 8-month previous one no longer zips index-for-index into unrelated
+  // months. Falls back to the months actually present when not given.
+  currentMonthsAxis: string[] = Object.keys(current).sort(),
+  previousMonthsAxis: string[] = Object.keys(previous || {}).sort(),
 ): StackedBarData => {
-  const currentMonths = Object.keys(current).sort();
-  const previousMonths = Object.keys(previous || {}).sort();
+  const currentMonths = currentMonthsAxis;
+  const previousMonths = previousMonthsAxis;
   const rowCount = Math.max(currentMonths.length, previousMonths.length);
   const months = Array.from({ length: rowCount }, (_, i) => currentMonths[i] || previousMonths[i] || '');
 
@@ -129,7 +147,9 @@ export const buildStackedBarData = (
         label: `Prev Income: ${cat}`,
         data: prevIncomeData[cat] || new Array(rowCount).fill(0),
         stack: 'previous-income',
-        color: colors[i % colors.length],
+        // Same base hue as its current-period counterpart, faded - a ghost of
+        // that series rather than a separately-legended color.
+        color: withAlpha(colors[i % colors.length], 0.35),
         valueFormatter: vf,
         categoryKey: cat === OTHER_INCOME_LABEL ? null : cat,
       });
@@ -141,7 +161,7 @@ export const buildStackedBarData = (
         label: `Prev Expense: ${cat}`,
         data: prevExpenseData[cat] || new Array(rowCount).fill(0),
         stack: 'previous-expense',
-        color: colors[(i + 3) % colors.length],
+        color: withAlpha(colors[(i + 3) % colors.length], 0.35),
         valueFormatter: vf,
         categoryKey: cat === OTHER_EXPENSE_LABEL ? null : cat,
       });

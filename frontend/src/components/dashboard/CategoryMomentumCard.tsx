@@ -8,6 +8,11 @@ interface CategoryMomentumCardProps {
   stackedTrends: StackedMonthlyTrends;
   maxRows?: number;
   onCategoryClick?: (category: string) => void;
+  /** Displayed label for a category key - stackedTrends carries a parent's
+   * *key* at category_level=parent (see _build_parent_category_lookup), so it
+   * round-trips through onCategoryClick's filter; this resolves it to a label
+   * for display. Identity by default. */
+  resolveLabel?: (category: string) => string;
 }
 
 const formatRatio = (ratio: number | null): string => {
@@ -20,6 +25,7 @@ export const CategoryMomentumCard: React.FC<CategoryMomentumCardProps> = ({
   stackedTrends,
   maxRows = 6,
   onCategoryClick,
+  resolveLabel = (category) => category,
 }) => {
   const momentum = buildCategoryMomentum(stackedTrends);
   const months = Object.keys(stackedTrends).sort();
@@ -63,7 +69,7 @@ export const CategoryMomentumCard: React.FC<CategoryMomentumCardProps> = ({
                     >
                       <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
                         <Stack direction="row" spacing={0.75} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
-                          <Typography variant="body2">{row.category}</Typography>
+                          <Typography variant="body2">{resolveLabel(row.category)}</Typography>
                           <Chip size="small" color="error" variant="outlined" label={formatRatio(row.deltaRatio)} />
                         </Stack>
                         <Typography variant="body2" sx={{ fontWeight: 600 }}>
@@ -97,7 +103,7 @@ export const CategoryMomentumCard: React.FC<CategoryMomentumCardProps> = ({
                       direction="row"
                       sx={{ justifyContent: 'space-between', alignItems: 'center' }}
                     >
-                      <Typography variant="body2" color="text.secondary">{row.category}</Typography>
+                      <Typography variant="body2" color="text.secondary">{resolveLabel(row.category)}</Typography>
                       <Typography variant="body2" sx={{ color: 'success.main', fontWeight: 600 }}>
                         {formatCurrency(row.delta)}
                       </Typography>

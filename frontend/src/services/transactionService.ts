@@ -129,6 +129,50 @@ export interface AccountCoverage {
   months: CoverageMonthEntry[];
 }
 
+/** One row per account from GET /accounts/coverage - the batched summary
+ * behind the dashboard's upload-activity table, as opposed to AccountCoverage
+ * above (one account's full month-by-month detail, used on /coverage). */
+export interface AccountCoverageSummary {
+  account_id: string;
+  account_name: string;
+  account_type: string | null;
+  first_date: string | null;
+  last_date: string | null;
+  transaction_count: number;
+  covered: number;
+  gap: number;
+  missing: number;
+  dismissed: number;
+}
+
+export interface TransferFlow {
+  from_account: string;
+  to_account: string;
+  amount: number;
+  count: number;
+  /** False for a one-sided transfer: the counterpart account was named on the
+   * transaction, but no matching row was found to pair it with. */
+  matched: boolean;
+}
+
+export interface TransferAnalytics {
+  monthly: Record<string, { amount: number; count: number }>;
+  flows: TransferFlow[];
+  total_amount: number;
+  transfer_count: number;
+}
+
+export interface RecurringCharge {
+  merchant: string;
+  months_active: number;
+  charge_count: number;
+  total_amount: number;
+  average_amount: number;
+  last_date: string;
+  amount_spread: number;
+  annualized_amount: number;
+}
+
 /** A main (group) category has parent_id null; a leaf's parent_id points at
  * a main. Only leaves are ever assigned to a transaction. */
 export interface CategoryNode {
@@ -244,8 +288,17 @@ export const transactionService = {
   getAccountCoverage: (accountId: string) =>
     api.get<AccountCoverage>(`/accounts/${accountId}/coverage`),
 
+  listAccountsCoverage: () =>
+    api.get<AccountCoverageSummary[]>('/accounts/coverage'),
+
   setCoverageMonthStatus: (accountId: string, month: string, status: 'missing' | 'dismissed' | 'gap') =>
     api.put<{ status: string }>(`/accounts/${accountId}/coverage/${month}`, { status }),
+
+  getTransferAnalytics: (account_id?: string | null, date_from?: string | null, date_to?: string | null) =>
+    api.get<TransferAnalytics>('/analytics/transfers', { params: { account_id, date_from, date_to } }),
+
+  getRecurringCharges: (account_id?: string | null, min_months?: number) =>
+    api.get<RecurringCharge[]>('/analytics/recurring', { params: { account_id, min_months } }),
 
   listCategories: () =>
     api.get<CategoryNode[]>('/categories'),

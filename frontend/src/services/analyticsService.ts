@@ -1,4 +1,4 @@
-import { ResolvedDateRange, previousPeriod } from '../utils/dateRange';
+import { enumerateMonths, ResolvedDateRange, previousPeriod } from '../utils/dateRange';
 import {
     AnalyticsSummary,
     BreakdownGroupBy,
@@ -52,6 +52,15 @@ export interface AnalyticsDashboardData {
   /** Spend per merchant, same shape as `breakdown`. Only populated when
    * `includeMerchants` is set - it costs an extra aggregate request. */
   merchantBreakdown: BreakdownEntry[];
+  /** Every month in the selected range, in order - the dense x-axis charts
+   * should plot against, as opposed to `Object.keys(stackedTrends)` which
+   * only has entries for months with a transaction. Empty for the 'all'
+   * preset (no bound to enumerate from); callers fall back to the observed
+   * months themselves in that case. */
+  months: string[];
+  /** Same, for the comparison period. Empty when compare is off or the
+   * period couldn't be shifted (no explicit from/to, e.g. 'all'). */
+  previousMonths: string[];
 }
 
 export function mapBreakdown(breakdown: CategoryBreakdown): BreakdownEntry[] {
@@ -62,11 +71,16 @@ export function mapBreakdown(breakdown: CategoryBreakdown): BreakdownEntry[] {
   }));
 }
 
-export function mapTrends(trends: MonthlyTrends): TrendEntry[] {
-  return Object.entries(trends).map(([month, data]) => ({
+/** Maps a trends response to chart rows. When `months` is given, the result
+ * is dense over that axis (a month with no transactions becomes a zero row
+ * instead of being absent) - without it, months come from the response alone,
+ * sorted, which is what the 'all' preset falls back to. */
+export function mapTrends(trends: MonthlyTrends, months?: string[]): TrendEntry[] {
+  const axis = months && months.length > 0 ? months : Object.keys(trends).sort();
+  return axis.map((month) => ({
     month,
-    income: data.income,
-    expenses: data.expenses,
+    income: trends[month]?.income || 0,
+    expenses: trends[month]?.expenses || 0,
   }));
 }
 
@@ -93,18 +107,22 @@ export const analyticsService = {
         : null,
     ]);
 
+    const months = enumerateMonths(range.from, range.to);
+
     let previousSummary: AnalyticsSummary | null = null;
     let previousTrends: TrendEntry[] = [];
     let previousStackedTrends: StackedMonthlyTrends | null = null;
+    let previousMonths: string[] = [];
     if (compare && range.from && range.to) {
       const prev = previousPeriod(range);
+      previousMonths = enumerateMonths(prev.from, prev.to);
       const [prevSummaryRes, prevTrendsRes, prevStackedRes] = await Promise.all([
         transactionService.getAnalyticsSummary(accountId, prev.from, prev.to, categoryKeys, merchantNames),
         transactionService.getMonthlyTrends(accountId, prev.from, prev.to, categoryKeys, merchantNames),
         transactionService.getStackedMonthlyTrends(accountId, prev.from, prev.to, categoryLevel, categoryKeys, merchantNames),
       ]);
       previousSummary = prevSummaryRes.data;
-      previousTrends = mapTrends(prevTrendsRes.data);
+      previousTrends = mapTrends(prevTrendsRes.data, previousMonths);
       previousStackedTrends = prevStackedRes.data;
     }
 
@@ -112,7 +130,7 @@ export const analyticsService = {
       summary: summaryRes.data,
       previousSummary,
       breakdown: mapBreakdown(breakdownRes.data),
-      trends: mapTrends(trendsRes.data),
+      trends: mapTrends(trendsRes.data, months),
       previousTrends,
       stackedTrends: stackedRes.data,
       previousStackedTrends,
@@ -120,6 +138,8 @@ export const analyticsService = {
         ? Object.keys(merchantBreakdownRes.data).sort((a, b) => a.localeCompare(b))
         : [],
       merchantBreakdown: merchantBreakdownRes ? mapBreakdown(merchantBreakdownRes.data) : [],
+      months,
+      previousMonths,
     };
   },
 };

@@ -184,6 +184,10 @@ class TransactionService:
 
     @staticmethod
     def _build_parent_category_lookup(db: Session) -> dict[str, str]:
+        """Maps a leaf's key to its parent's key (not label) - the rolled-up
+        value has to survive a round trip back through category_keys, which
+        matches on keys (see _apply_analytics_filters), for a legend click on
+        a parent-level chart to filter anything at all."""
         categories = db.query(Category).all()
         by_id = {category.id: category for category in categories}
         lookup: dict[str, str] = {}
@@ -192,7 +196,7 @@ class TransactionService:
             if not category.parent_id:
                 continue
             parent = by_id.get(category.parent_id)
-            lookup[category.key] = parent.label if parent else category.label
+            lookup[category.key] = parent.key if parent else category.key
 
         return lookup
 

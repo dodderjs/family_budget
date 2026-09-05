@@ -7,6 +7,7 @@ import { FilterBar } from '../components/FilterBar';
 import { analyticsService, BreakdownEntry, TrendEntry } from '../services/analyticsService';
 import { AnalyticsSummary, BreakdownGroupBy, CategoryLevel, StackedMonthlyTrends } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
+import { mainCategoryLabel } from '../utils/categoryHierarchy';
 import { downloadCsvFile } from '../utils/csvExport';
 import { accountIdParam, resolveDateRange } from '../utils/dateRange';
 
@@ -18,6 +19,8 @@ export const AnalyticsPage: React.FC = () => {
   const [previousTrends, setPreviousTrends] = useState<TrendEntry[]>([]);
   const [stackedTrends, setStackedTrends] = useState<StackedMonthlyTrends>({});
   const [previousStackedTrends, setPreviousStackedTrends] = useState<StackedMonthlyTrends | null>(null);
+  const [months, setMonths] = useState<string[]>([]);
+  const [previousMonths, setPreviousMonths] = useState<string[]>([]);
   const [availableMerchants, setAvailableMerchants] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [groupBy, setGroupBy] = useState<BreakdownGroupBy>('category');
@@ -39,6 +42,11 @@ export const AnalyticsPage: React.FC = () => {
   const categoryKeys = selectedCategories.length > 0 ? selectedCategories.join(',') : undefined;
   const merchantNames = selectedMerchants.length > 0 ? selectedMerchants.join(',') : undefined;
   const topCategory = breakdown.length > 0 ? [...breakdown].sort((a, b) => b.value - a.value)[0] : null;
+  // At category_level=parent the backend reports each row by the parent's
+  // *key* (see _build_parent_category_lookup), so it round-trips through the
+  // category_keys filter - resolve to a label wherever one is displayed.
+  const resolveCategoryLabel = (key: string): string =>
+    groupBy === 'category' && categoryLevel === 'parent' ? mainCategoryLabel(categories, key) : key;
   const comparisonEnabled = !!range.from && !!range.to;
   const expenseDelta = previousSummary
     ? `${(((summary?.total_expenses || 0) - previousSummary.total_expenses) / Math.abs(previousSummary.total_expenses || 1) * 100).toFixed(1)}%`
@@ -66,6 +74,8 @@ export const AnalyticsPage: React.FC = () => {
       setPreviousTrends(data.previousTrends);
       setStackedTrends(data.stackedTrends);
       setPreviousStackedTrends(data.previousStackedTrends);
+      setMonths(data.months);
+      setPreviousMonths(data.previousMonths);
       setAvailableMerchants(data.availableMerchants);
       setPreviousSummary(data.previousSummary);
     } catch (err: any) {
@@ -156,7 +166,7 @@ export const AnalyticsPage: React.FC = () => {
                 <CardContent>
                   <Typography variant="overline" color="text.secondary">Leading category</Typography>
                   <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                    {topCategory?.name || 'No category data'}
+                    {topCategory ? resolveCategoryLabel(topCategory.name) : 'No category data'}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
                     {topCategory ? `${topCategory.value.toLocaleString()} in selected range` : 'Upload and categorize transactions to populate this view.'}
@@ -197,8 +207,11 @@ export const AnalyticsPage: React.FC = () => {
           previousTrends={previousTrends}
           stackedTrends={stackedTrends}
           previousStackedTrends={previousStackedTrends}
+          months={months}
+          previousMonths={previousMonths}
           groupBy={groupBy}
           categoryLevel={categoryLevel}
+          categories={categories}
           onCategoryFilterChange={setSelectedCategories}
           activeCategoryKeys={selectedCategories}
         />

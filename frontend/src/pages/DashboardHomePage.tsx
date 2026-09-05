@@ -19,22 +19,19 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AnalyticsCharts } from '../components/analytics/AnalyticsCharts';
 import { CategoryMomentumCard } from '../components/dashboard/CategoryMomentumCard';
+import { buildTopInsights } from '../components/dashboard/insightHelpers';
+import { InsightsStrip } from '../components/dashboard/InsightsStrip';
+import { KpiCard } from '../components/dashboard/KpiCard';
 import { RecurringChargesCard } from '../components/dashboard/RecurringChargesCard';
-import { SpendingInsightCards } from '../components/dashboard/SpendingInsightCards';
 import { TopMerchantsCard } from '../components/dashboard/TopMerchantsCard';
 import { TransfersCard } from '../components/dashboard/TransfersCard';
 import { FilterBar } from '../components/FilterBar';
 import { dashboardService } from '../services/dashboardService';
+import { CategoryLevel } from '../services/transactionService';
 import { useTransactionStore } from '../store/transactionStore';
+import { buildCategoryGroups, mainCategoryLabel } from '../utils/categoryHierarchy';
 import { formatCurrency } from '../utils/currency';
 import { accountIdParam, resolveDateRange } from '../utils/dateRange';
-
-const deltaText = (current: number, previous: number): string => {
-  if (!previous) return 'No previous-period baseline';
-  const pct = ((current - previous) / Math.abs(previous)) * 100;
-  const sign = pct >= 0 ? '+' : '';
-  return `${sign}${pct.toFixed(1)}% vs previous period`;
-};
 
 export const DashboardHomePage: React.FC = () => {
   const [loading, setLoading] = useState(false);
@@ -45,19 +42,54 @@ export const DashboardHomePage: React.FC = () => {
   const datePreset = useTransactionStore((s) => s.datePreset);
   const customDateFrom = useTransactionStore((s) => s.customDateFrom);
   const customDateTo = useTransactionStore((s) => s.customDateTo);
+  const categories = useTransactionStore((s) => s.categories);
+
   // The dashboard has no category picker of its own - this only exists so a
-  // Monthly Trends legend click can filter the page, and is shown/cleared via
-  // the chip row below FilterBar so the filter is never silent.
+  // Monthly Trends legend click (or a donut drill-down) can filter the page,
+  // and is shown/cleared via the chip row below FilterBar so the filter is
+  // never silent.
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  // Parent is the landing view - 23 leaf categories is too much to scan at a
+  // glance, and drilling in is one click away.
+  const [categoryLevel, setCategoryLevel] = useState<CategoryLevel>('parent');
+  const [drilldownParent, setDrilldownParent] = useState<string | null>(null);
 
   const range = resolveDateRange(datePreset, customDateFrom, customDateTo);
   const accountId = accountIdParam(selectedAccountIds);
   const categoryKeys = selectedCategories.length > 0 ? selectedCategories.join(',') : undefined;
 
+  const categoryGroups = useMemo(() => buildCategoryGroups(categories), [categories]);
+  // At parent level (and not drilled) the backend reports parent *keys* (see
+  // _build_parent_category_lookup) so they round-trip through category_keys -
+  // resolve to a label anywhere one is displayed.
+  const resolveCategoryLabel = (key: string): string =>
+    categoryLevel === 'parent' && !drilldownParent ? mainCategoryLabel(categories, key) : key;
+
   const handleLegendCategoryToggle = (categoryKey: string) => {
     setSelectedCategories((prev) =>
       prev.includes(categoryKey) ? prev.filter((k) => k !== categoryKey) : [...prev, categoryKey]
     );
+  };
+
+  const handleDrilldown = (parentKey: string) => {
+    const group = categoryGroups.find((g) => g.parentKey === parentKey);
+    setDrilldownParent(parentKey);
+    setCategoryLevel('leaf');
+    setSelectedCategories(group ? group.leafKeys : []);
+  };
+
+  const handleClearDrilldown = () => {
+    setDrilldownParent(null);
+    setCategoryLevel('parent');
+    setSelectedCategories([]);
+  };
+
+  const handleCategoryLevelChange = (level: CategoryLevel) => {
+    // Only reachable at the top level (the toggle hides itself while
+    // drilled) - always a level switch on an empty filter, not a change
+    // underneath an existing one.
+    setCategoryLevel(level);
+    setSelectedCategories([]);
   };
 
   // Changing a filter fires a new load while the previous one is still in
@@ -71,7 +103,7 @@ export const DashboardHomePage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await dashboardService.loadHomeData({ accountId, range, categoryKeys });
+      const response = await dashboardService.loadHomeData({ accountId, range, categoryKeys, categoryLevel });
       if (requestId !== requestIdRef.current) return;
       setData(response);
     } catch (err: any) {
@@ -85,12 +117,27 @@ export const DashboardHomePage: React.FC = () => {
   useEffect(() => {
     loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId, range.from, range.to, categoryKeys]);
+  }, [accountId, range.from, range.to, categoryKeys, categoryLevel]);
 
   const topCategories = useMemo(() => {
     if (!data) return [];
     return [...data.analytics.breakdown].sort((a, b) => b.value - a.value).slice(0, 6);
   }, [data]);
+
+  const insights = useMemo(() => {
+    if (!data) return [];
+    return buildTopInsights({
+      stackedTrends: data.analytics.stackedTrends,
+      summary: data.analytics.summary,
+      previousSummary: data.analytics.previousSummary,
+      merchantBreakdown: data.analytics.merchantBreakdown,
+      recurring: data.recurring,
+      monthsInRange: data.analytics.months.length || Object.keys(data.analytics.stackedTrends).length,
+      coverageMonths: data.totals.coverageMonths,
+      resolveCategoryLabel,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, categoryLevel, drilldownParent, categories]);
 
   if (loading && !data) {
     return <CircularProgress size={28} />;
@@ -106,8 +153,12 @@ export const DashboardHomePage: React.FC = () => {
     (latest, account) => (account.lastDate && (!latest || account.lastDate > latest) ? account.lastDate : latest),
     null
   );
-  const expenseDelta = previousSummary ? deltaText(summary.total_expenses, previousSummary.total_expenses) : 'Enable period compare from filters';
-  const incomeDelta = previousSummary ? deltaText(summary.total_income, previousSummary.total_income) : 'Enable period compare from filters';
+  const expenseDeltaPct = previousSummary && previousSummary.total_expenses
+    ? ((summary.total_expenses - previousSummary.total_expenses) / Math.abs(previousSummary.total_expenses)) * 100
+    : null;
+  const incomeDeltaPct = previousSummary && previousSummary.total_income
+    ? ((summary.total_income - previousSummary.total_income) / Math.abs(previousSummary.total_income)) * 100
+    : null;
 
   const coverageTotalMonths =
     data.totals.coverageMonths.covered +
@@ -117,6 +168,10 @@ export const DashboardHomePage: React.FC = () => {
   const coverageScore = coverageTotalMonths > 0
     ? ((data.totals.coverageMonths.covered + data.totals.coverageMonths.dismissed) / coverageTotalMonths) * 100
     : 0;
+
+  const expenseSparkline = data.analytics.trends.map((t) => t.expenses);
+  const incomeSparkline = data.analytics.trends.map((t) => t.income);
+  const drilldownLabel = drilldownParent ? mainCategoryLabel(categories, drilldownParent) : null;
 
   return (
     <Stack spacing={3}>
@@ -130,11 +185,11 @@ export const DashboardHomePage: React.FC = () => {
 
       <FilterBar />
 
-      {selectedCategories.length > 0 && (
+      {selectedCategories.length > 0 && !drilldownParent && (
         <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
           <Typography variant="body2" color="text.secondary">Filtered by category:</Typography>
           {selectedCategories.map((key) => (
-            <Chip key={key} size="small" label={key} onDelete={() => handleLegendCategoryToggle(key)} />
+            <Chip key={key} size="small" label={resolveCategoryLabel(key)} onDelete={() => handleLegendCategoryToggle(key)} />
           ))}
           <Button size="small" onClick={() => setSelectedCategories([])}>Clear</Button>
         </Stack>
@@ -151,20 +206,24 @@ export const DashboardHomePage: React.FC = () => {
           },
         }}
       >
-        <Card variant="outlined">
-          <CardContent>
-            <Typography variant="caption" color="text.secondary">Expenses (Current Period)</Typography>
-            <Typography variant="h5" sx={{ color: 'error.main', fontWeight: 700 }}>{formatCurrency(summary.total_expenses)}</Typography>
-            <Typography variant="body2" color="text.secondary">{expenseDelta}</Typography>
-          </CardContent>
-        </Card>
-        <Card variant="outlined">
-          <CardContent>
-            <Typography variant="caption" color="text.secondary">Income (Current Period)</Typography>
-            <Typography variant="h5" sx={{ color: 'success.main', fontWeight: 700 }}>{formatCurrency(summary.total_income)}</Typography>
-            <Typography variant="body2" color="text.secondary">{incomeDelta}</Typography>
-          </CardContent>
-        </Card>
+        <KpiCard
+          label="Expenses (Current Period)"
+          value={formatCurrency(summary.total_expenses)}
+          valueColor="error.main"
+          deltaPct={expenseDeltaPct}
+          higherIsBetter={false}
+          sparkline={expenseSparkline}
+          sparklineColor="#f87171"
+        />
+        <KpiCard
+          label="Income (Current Period)"
+          value={formatCurrency(summary.total_income)}
+          valueColor="success.main"
+          deltaPct={incomeDeltaPct}
+          higherIsBetter
+          sparkline={incomeSparkline}
+          sparklineColor="#10b981"
+        />
         <Card variant="outlined">
           <CardContent>
             <Typography variant="caption" color="text.secondary">User Uploads Tracked</Typography>
@@ -186,24 +245,25 @@ export const DashboardHomePage: React.FC = () => {
         </Card>
       </Box>
 
+      <InsightsStrip insights={insights} />
+
       <AnalyticsCharts
         breakdown={data.analytics.breakdown}
         trends={data.analytics.trends}
         previousTrends={data.analytics.previousTrends}
         stackedTrends={data.analytics.stackedTrends}
         previousStackedTrends={data.analytics.previousStackedTrends}
+        months={data.analytics.months}
+        previousMonths={data.analytics.previousMonths}
         groupBy="category"
+        categoryLevel={categoryLevel}
+        categories={categories}
+        onCategoryLevelChange={handleCategoryLevelChange}
+        onDrilldown={handleDrilldown}
+        drilldownLabel={drilldownLabel}
+        onClearDrilldown={handleClearDrilldown}
         onCategoryFilterChange={setSelectedCategories}
         activeCategoryKeys={selectedCategories}
-      />
-
-      <SpendingInsightCards
-        stackedTrends={data.analytics.stackedTrends}
-        totalIncome={summary.total_income}
-        totalExpenses={summary.total_expenses}
-        breakdown={data.analytics.breakdown}
-        recurring={data.recurring}
-        transferTotal={data.transfers.total_amount}
       />
 
       <Box
@@ -216,6 +276,7 @@ export const DashboardHomePage: React.FC = () => {
         <CategoryMomentumCard
           stackedTrends={data.analytics.stackedTrends}
           onCategoryClick={handleLegendCategoryToggle}
+          resolveLabel={resolveCategoryLabel}
         />
         <TopMerchantsCard
           merchants={data.analytics.merchantBreakdown}
@@ -225,7 +286,7 @@ export const DashboardHomePage: React.FC = () => {
 
       <RecurringChargesCard charges={data.recurring} latestDataDate={latestDataDate} />
 
-      <TransfersCard transfers={data.transfers} />
+      <TransfersCard transfers={data.transfers} months={data.analytics.months} />
 
       <Box
         sx={{
@@ -284,7 +345,7 @@ export const DashboardHomePage: React.FC = () => {
               {topCategories.map((category) => (
                 <Box key={category.name}>
                   <Stack direction="row" sx={{ justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="body2">{category.name}</Typography>
+                    <Typography variant="body2">{resolveCategoryLabel(category.name)}</Typography>
                     <Typography variant="body2" sx={{ fontWeight: 600 }}>
                       {formatCurrency(category.value)}
                     </Typography>

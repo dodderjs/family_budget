@@ -6,8 +6,9 @@ from app.db.database import get_db
 from app.models.schemas import (
     UploadRequest, TransactionResponse, TransactionListResponse, TransactionUpdate, TransferPairUpdate,
     AccountCreate, AccountUpdate, AccountResponse, AnalyticsSummary, TrainingDataCreate,
-    CardCreate, CardResponse, AccountCoverageResponse, CoverageFlagUpdate,
-    CategoryCreate, CategoryResponse, CategoryUpdate, RetrainModelResponse
+    CardCreate, CardResponse, AccountCoverageResponse, AccountCoverageSummary, CoverageFlagUpdate,
+    CategoryCreate, CategoryResponse, CategoryUpdate, RetrainModelResponse,
+    TransferAnalytics, RecurringCharge,
 )
 from app.services.transaction_service import (
     TransactionService, DuplicateTransactionError, TransactionNotFoundError
@@ -44,6 +45,12 @@ def create_account(account: AccountCreate, db: Session = Depends(get_db)):
 def list_accounts(db: Session = Depends(get_db)):
     """List all accounts"""
     return db.query(Account).all()
+
+@router.get("/accounts/coverage", response_model=list[AccountCoverageSummary])
+def list_accounts_coverage(db: Session = Depends(get_db)):
+    """Coverage summary for every account in one batched call - declared
+    ahead of /accounts/{account_id} so the literal path wins the match."""
+    return CoverageService.get_all_accounts_coverage(db)
 
 @router.patch("/accounts/{account_id}", response_model=AccountResponse)
 def update_account(account_id: str, update: AccountUpdate, db: Session = Depends(get_db)):
@@ -401,6 +408,29 @@ def get_stacked_monthly_trends(
         _parse_csv_param(category_keys),
         _parse_csv_param(merchant_names),
     )
+
+@router.get("/analytics/transfers", response_model=TransferAnalytics)
+def get_transfer_analytics(
+    account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    db: Session = Depends(get_db)
+):
+    """Money moved between the family's own accounts, per month and per route."""
+    return TransactionService.get_transfer_analytics(db, account_id, date_from, date_to)
+
+@router.get("/analytics/recurring", response_model=list[RecurringCharge])
+def get_recurring_charges(
+    account_id: str = None,
+    date_from: str = None,
+    date_to: str = None,
+    min_months: int = 3,
+    db: Session = Depends(get_db)
+):
+    """Merchants that look like a recurring/subscription charge. With no
+    date range given, defaults to a trailing 12 months anchored on the
+    newest transaction rather than today."""
+    return TransactionService.get_recurring_charges(db, account_id, date_from, date_to, min_months)
 
 @router.post("/ml/retrain", response_model=RetrainModelResponse)
 def retrain_model(trained_samples_selected: int = 0, db: Session = Depends(get_db)):
