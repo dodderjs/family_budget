@@ -234,7 +234,8 @@ class CategoryPredictor:
         if days_of_week is None:
             days_of_week = [None] * len(texts)
 
-        vectorizer = TfidfVectorizer(lowercase=True, analyzer='char_wb', ngram_range=(3, 5))
+        vectorizer = TfidfVectorizer(lowercase=True, analyzer='char_wb', ngram_range=(3, 5),
+                                     max_features=settings.ML_MAX_FEATURES)
         text_features = vectorizer.fit_transform([t.lower() for t in texts])
         X = hstack([text_features, self._dense_features(amounts, days_of_month, days_of_week)]).tocsr()
 

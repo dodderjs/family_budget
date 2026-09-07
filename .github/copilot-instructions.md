@@ -5,7 +5,7 @@ description: "Repo-wide context for Family Budget: a CSV-import + ML-categorizat
 
 # Family Budget
 
-FastAPI (Python 3.11) + SQLAlchemy/MariaDB backend, React/TypeScript/Vite/Mantine frontend, sklearn (TF-IDF + LogisticRegression) for transaction categorization. Full endpoint docs: [API_REFERENCE.md](../API_REFERENCE.md). Setup: [README.md](../README.md). Don't restate either here — read them.
+FastAPI (Python 3.11) + SQLAlchemy/MariaDB backend, React/TypeScript/Vite frontend (MUI v9 + AG Grid Enterprise + Zustand), sklearn (TF-IDF + LogisticRegression) for transaction categorization. Full endpoint docs: [API_REFERENCE.md](../API_REFERENCE.md). Setup: [README.md](../README.md). Don't restate either here — read them.
 
 Scoped, file-pattern-triggered guides live in [.github/instructions/](instructions/): `backend-api`, `frontend-react`, `database-schema`, `ml-categorization`, `testing`. They load automatically based on which file you're editing.
 
@@ -32,10 +32,19 @@ frontend/src/
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d --build
-docker exec family-budget-api python -m pytest -v   # 45 tests, in-memory SQLite, no network
+docker exec family-budget-api python -m pytest -v   # backend: in-memory SQLite, no network
+docker exec family-budget-web npm test              # frontend: vitest run
 ```
 
-No frontend test suite exists yet. Verify UI changes by actually running the dev server and loading the page.
+The frontend container is `family-budget-web`, not `family-budget-frontend` (that's just the npm package name).
+
+The frontend suite is vitest + Testing Library + jsdom, in `frontend/src/__tests__/{services,utils}/*.test.ts` — it covers extracted logic, not rendered components. Neither suite proves a UI change renders; screenshot it to confirm:
+
+```bash
+docker exec family-budget-web node scripts/screenshot.mjs http://localhost:5173/ /app/.screenshot.png
+```
+
+`./frontend` is bind-mounted at `/app`, so the PNG appears at `frontend/.screenshot.png`. Don't hand-roll a Playwright script: the container is Alpine/musl, so Playwright's bundled Chromium won't execute, and the API is only reachable via the host-resolver mapping the script already sets.
 
 ## Supported CSV formats (real banks, not placeholders)
 
@@ -54,4 +63,4 @@ No frontend test suite exists yet. Verify UI changes by actually running the dev
 
 For any bug/improvement: state the issue, find the root cause by reading the code (don't guess), propose the smallest fix, implement it, add/update a test, run the real suite. Ask before doing a larger redesign. Priority when triaging multiple issues: data correctness → transfer detection → categorization quality → correction feedback loop → frontend usability → dashboards → performance → cleanup.
 
-No comments unless the WHY is non-obvious. Services pattern (route → service → model). Pydantic schemas for every request/response shape. Type hints everywhere. This project has known, *intentional* gaps (no auth, no DB migrations via Alembic in practice, no frontend tests) — don't silently start "fixing" those unless asked.
+No comments unless the WHY is non-obvious. Services pattern (route → service → model). Pydantic schemas for every request/response shape. Type hints everywhere. This project has known, *intentional* gaps (no auth, no DB migrations via Alembic in practice) — don't silently start "fixing" those unless asked.

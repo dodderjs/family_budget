@@ -7,8 +7,10 @@ from app.services.account_service import AccountNotFoundError
 from app.services.currency_service import CurrencyService, HUF
 from app.services.ml_service import predictor, _merchant_key
 from app.services.normalization import detect_transfers, detect_curve_duplicates, _dates_within
+from app.db.database import SessionLocal
 from datetime import datetime
 import json
+import threading
 
 
 # Shared SQL expressions for the analytics aggregates. Kept at module level so
@@ -518,8 +520,6 @@ class TransactionService:
         # visually so the user knows is_transfer (and analytics exclusion)
         # won't kick in until/unless a pairing exists.
 
-        was_unfinalized = transaction.category_final is None
-
         # Record training data
         if transaction.category_predicted != category:
             training = TrainingData(
@@ -537,12 +537,6 @@ class TransactionService:
         transaction.updated_at = datetime.utcnow()
 
         db.commit()
-
-        if was_unfinalized:
-            try:
-                TransactionService._auto_retrain_and_repredict_if_needed(db)
-            except Exception:
-                db.rollback()
 
         db.refresh(transaction)
 
@@ -1067,3 +1061,32 @@ class TransactionService:
 
         charges.sort(key=lambda c: c["annualized_amount"], reverse=True)
         return charges
+
+
+# Only one retrain may run at a time. The fit briefly allocates a dense
+# n_classes x n_features workspace on top of the resident model, and this is a
+# single-worker process - two confirmations landing together would otherwise
+# stack two of those workspaces. Non-blocking: a skipped retrain is harmless
+# because the next confirmation past the step re-triggers it.
+_retrain_lock = threading.Lock()
+
+
+def run_auto_retrain() -> None:
+    """Background entry point for the post-confirmation retrain and re-predict.
+
+    Opens its own Session rather than reusing the request's: get_db() closes
+    that one in its finally as soon as the response is sent, which is before
+    this runs.
+    """
+    if not _retrain_lock.acquire(blocking=False):
+        return
+    try:
+        db = SessionLocal()
+        try:
+            TransactionService._auto_retrain_and_repredict_if_needed(db)
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+    finally:
+        _retrain_lock.release()

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, UploadFile, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, File, UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 import json
@@ -11,7 +11,7 @@ from app.models.schemas import (
     TransferAnalytics, RecurringCharge,
 )
 from app.services.transaction_service import (
-    TransactionService, DuplicateTransactionError, TransactionNotFoundError
+    TransactionService, DuplicateTransactionError, TransactionNotFoundError, run_auto_retrain
 )
 from app.services.account_service import (
     AccountService, AccountNotFoundError, AccountHasTransactionsError,
@@ -293,6 +293,7 @@ def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
 def update_transaction(
     transaction_id: str,
     update: TransactionUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ):
     """Update transaction details and category"""
@@ -301,9 +302,17 @@ def update_transaction(
         raise HTTPException(status_code=404, detail="Transaction not found")
 
     if update.category_final:
+        # Only a newly finalized row moves the finalized count, and the retrain
+        # threshold is a function of that count - re-confirming an already
+        # finalized row would otherwise retrain again at a standstill count.
+        was_unfinalized = transaction.category_final is None
         transaction = TransactionService.update_transaction_category(
             db, transaction_id, update.category_final
         )
+        if was_unfinalized:
+            # Off the request path: the fit plus the re-prediction sweep is the
+            # heaviest thing the API does, and the user is waiting on this PATCH.
+            background_tasks.add_task(run_auto_retrain)
 
     if update.merchant is not None:
         transaction.merchant = update.merchant

@@ -5,24 +5,22 @@
 ### Development
 ```bash
 cd /mnt/f/wwwLinux/family_budget
-cp .env.example .env
-docker-compose up --build
+docker compose -f docker-compose.dev.yml up -d --build
 ```
+The frontend container (`family-budget-web`) runs the Vite dev server (`npm run dev`) with hot reload against a bind-mounted `./frontend`.
 
 ### Production Deployment
 ```bash
-# Build images once
-docker-compose build
-
-# Run services
-docker-compose up -d  # Run in background
+cp .env.example .env   # set DATABASE_URL to point at your MariaDB instance
+docker compose -f docker-compose.prod.yml up -d --build
 
 # Check status
-docker-compose ps
+docker compose -f docker-compose.prod.yml ps
 
 # View logs
-docker-compose logs -f
+docker compose -f docker-compose.prod.yml logs -f
 ```
+The frontend's `Dockerfile` is a multi-stage build: a `build` stage compiles the Vite bundle (`npm run build`), and the `prod` target (an `nginx:alpine` image) serves that static output on port 80. `frontend/nginx.conf` reverse-proxies `/api/` to the `backend` container over the compose network — same same-origin design as the dev server's Vite proxy, so no `VITE_API_URL` needs to be set for prod. There's no `mariadb` service in `docker-compose.prod.yml`; point `DATABASE_URL` at your own MariaDB instance.
 
 ---
 
@@ -30,7 +28,7 @@ docker-compose logs -f
 
 | Service | URL | Purpose |
 |---------|-----|---------|
-| Frontend | http://localhost:5173 | User interface |
+| Frontend | http://localhost:5173 (dev) / http://localhost (prod) | User interface |
 | Backend API | http://localhost:8000 | REST API |
 | API Docs | http://localhost:8000/docs | Swagger documentation |
 | Health Check | http://localhost:8000/health | Service status |
@@ -155,8 +153,8 @@ docker-compose logs --tail=100
 - Configure innodb_buffer_pool_size in docker-compose.yml
 
 ### Frontend
-- Enable Vite production build
-- Minify and compress assets
+- Already done: `docker-compose.prod.yml` builds the Vite production bundle and serves it via nginx (see `frontend/Dockerfile`'s `prod` stage and `frontend/nginx.conf`), not the dev server.
+- nginx sets long-lived cache headers for hashed static assets (`frontend/nginx.conf`).
 
 ---
 
@@ -193,9 +191,9 @@ backend-2:
 - Partitioning large tables
 
 ### Frontend Caching
-- CDN for static assets
-- Browser caching headers
-- Service worker for offline capability
+- Browser caching headers: already set for hashed static assets in `frontend/nginx.conf`
+- CDN for static assets (not yet implemented)
+- Service worker for offline capability (not yet implemented)
 
 ---
 

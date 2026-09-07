@@ -1,4 +1,26 @@
-Family Budget: FastAPI + SQLAlchemy/MariaDB backend, React/TS/Vite/Mantine frontend, sklearn ML categorization. See [README.md](README.md) for setup and [API_REFERENCE.md](API_REFERENCE.md) for endpoints — don't duplicate those here, read them.
+Family Budget: FastAPI + SQLAlchemy/MariaDB backend, React/TS/Vite frontend (MUI v9 + AG Grid Enterprise + Zustand), sklearn ML categorization. See [README.md](README.md) for setup and [API_REFERENCE.md](API_REFERENCE.md) for endpoints — don't duplicate those here, read them.
+
+## Which doc answers what
+
+13 markdown files, ~5.4k lines. Read the one row that matches — don't sweep the repo.
+
+| File | Lines | Answers |
+|---|---|---|
+| [README.md](README.md) | 155 | Quick start, feature list, project layout. Start here. |
+| [API_REFERENCE.md](API_REFERENCE.md) | 490 | Every endpoint: request/response shapes, error codes, category reference, bank-format detection. |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 845 | Data model, backend/frontend structure, ML pipeline, data flow, and *why* decisions were made. ⚠️ stale UI stack |
+| [DEVELOPMENT.md](DEVELOPMENT.md) | 266 | Running without Docker, backend debugging/debugpy, adding dependencies, git workflow. |
+| [SETUP.md](SETUP.md) | 320 | First-run setup, configuration, upload flow walkthrough. Overlaps README. |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | 322 | Prod compose, DB backup/restore, env vars, scaling, disaster recovery. |
+| [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | 473 | Symptom-indexed fixes: Docker, backend, frontend, workflow. Check before debugging from scratch. |
+| [DOCKER_FIX.md](DOCKER_FIX.md) | 323 | Post-mortem of one specific compose/startup failure. Historical — the fix is already in the compose files. |
+| [OPTIMIZATION.md](OPTIMIZATION.md) | 877 | Performance/security recommendations. Mostly *unimplemented proposals*, not current state. ⚠️ stale UI stack |
+| [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | 388 | Command cheatsheet (docker, backend, frontend, common workflows). |
+| [CHECKLIST.md](CHECKLIST.md) | 199 | Build-completion checkboxes. Historical snapshot. ⚠️ stale UI stack |
+| [PROJECT_SUMMARY.md](PROJECT_SUMMARY.md) | 384 | Narrative of what was built and when. Historical snapshot. ⚠️ stale UI stack |
+| [data/SCHEMA.md](data/SCHEMA.md) | 49 | Hand-written SQL DDL sketch of the tables. `backend/app/models/transaction.py` is authoritative — prefer it. |
+
+⚠️ **stale UI stack** = still describes the frontend as Mantine + Recharts. It's MUI v9 + AG Grid + `@mui/x-charts`. Discount UI claims in those files; everything else in them still holds. This file and `.github/` are the current source of truth.
 
 ## Run it
 
@@ -10,12 +32,12 @@ Backend retries its DB connection on startup (`app/db/database.py:wait_for_db`) 
 
 ## Frontend package management
 
-Always run npm commands inside the container — never on the host:
+Always run npm commands inside the container — never on the host. The frontend container is named **`family-budget-web`** (`family-budget-frontend` is only the npm package name and is not a container — `docker exec` on it fails). This only applies to the dev container: `frontend/Dockerfile` is a multi-stage build, and `docker-compose.dev.yml` builds its `dev` target (Node, npm, Vite dev server), while `docker-compose.prod.yml` builds the `prod` target (nginx serving the static build, no Node/npm inside — `docker exec family-budget-web npm ...` fails there).
 
 ```bash
-docker exec family-budget-frontend npm install <package>
-docker exec family-budget-frontend npm uninstall <package>
-docker exec family-budget-frontend npm run <script>
+docker exec family-budget-web npm install <package>
+docker exec family-budget-web npm uninstall <package>
+docker exec family-budget-web npm run <script>
 ```
 
 Running npm on the host modifies `package.json`/`node_modules` outside the container and won't be reflected in the running dev server.
@@ -23,11 +45,22 @@ Running npm on the host modifies `package.json`/`node_modules` outside the conta
 ## Test
 
 ```bash
-docker exec family-budget-api python -m pytest -v
+docker exec family-budget-api python -m pytest -v      # backend
+docker exec family-budget-web npm test                 # frontend (vitest run)
 ```
-70+ tests, pure-Python/SQLite/in-memory — no network, runs in under a second. Always run this after touching `backend/app/`. If you can't reach Docker, the format/normalization tests have zero external deps and can run with bare `python3` outside any venv; DB- and ML-backed tests need `sqlalchemy`/`sklearn` installed.
 
-There's no frontend test suite yet. Verify frontend changes by actually loading http://localhost:5173 (or use the `run` skill) — don't claim a UI change works without seeing it render.
+Backend: pure-Python/SQLite/in-memory — no network, runs in under a second. Always run it after touching `backend/app/`. If you can't reach Docker, the format/normalization tests have zero external deps and can run with bare `python3` outside any venv; DB- and ML-backed tests need `sqlalchemy`/`sklearn` installed.
+
+Frontend: vitest + Testing Library + jsdom (`frontend/vitest.config.ts`, setup in `frontend/src/test/setup.ts`). Specs live in `frontend/src/__tests__/{services,utils}/*.test.ts` and cover extracted logic, not rendered components. Run it after touching `frontend/src/services/` or `frontend/src/utils/`.
+
+Neither suite proves a UI change renders. To see it actually render, screenshot it:
+
+```bash
+docker exec family-budget-web node scripts/screenshot.mjs http://localhost:5173/ /app/.screenshot.png [--selector "css"] [--full]
+# ./frontend is bind-mounted at /app, so the PNG lands at frontend/.screenshot.png — read it directly, no docker cp
+```
+
+Use this rather than the generic `run` or `webapp-testing` skills, and don't reinvent it: Playwright's bundled Chromium is glibc-only and won't execute on this Alpine/musl container, so the script points at apk's `/usr/bin/chromium-browser`; it also maps `localhost:8000` to `family-budget-api:8000` so the page's API calls resolve from inside the container. Both were painful to work out — see `frontend/scripts/screenshot.mjs` and `frontend/Dockerfile`. The script reports console/page errors on stderr, so check that output too. Don't claim a UI change works without seeing it render.
 
 ## Reset test data
 

@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     ML_AMOUNT_LOG_SCALE: float = 15.0
     ML_AUTO_RETRAIN_FINALIZED_THRESHOLD: int = 250
     ML_AUTO_RETRAIN_FINALIZED_STEP: int = 50
+    # Caps the char-ngram vocabulary. Unbounded, it grew with every import and
+    # made the L-BFGS workspace (dense n_classes x n_features history vectors)
+    # the peak-memory event in the whole stack - 469MB on a 24k vocabulary.
+    # 8000 also scores better than uncapped: the cap regularizes.
+    ML_MAX_FEATURES: int = 8000
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

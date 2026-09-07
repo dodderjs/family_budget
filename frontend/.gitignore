@@ -1,0 +1,3 @@
+
+# tsc -b build artifacts (now emitted to node_modules/.tmp)
+*.tsbuildinfo

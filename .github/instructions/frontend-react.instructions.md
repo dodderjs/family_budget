@@ -1,12 +1,12 @@
 ---
 name: "Frontend Component Development"
 description: "Use when: building React components/pages under frontend/src/, managing state with Zustand, or connecting to the API. Defines architecture, quality, testing, and Docker-first execution standards."
-applyTo: "frontend/src/**/*.tsx"
+applyTo: "frontend/src/**/*.ts,frontend/src/**/*.tsx"
 ---
 
 # Frontend Development Standards
 
-React 18 + TypeScript + Vite + Mantine 7 + Zustand + AG Grid + MUI X Charts.
+React 18 + TypeScript + Vite + MUI v9 (`@mui/material`, `@mui/icons-material`) + Zustand + AG Grid Enterprise + MUI X Charts + MUI X Date Pickers. Theming lives in `frontend/src/theme/` (`AppTheme.tsx`, `themePrimitives.ts`, `customizations/`).
 
 Use a strict layered structure: utility -> service -> page -> component.
 
@@ -56,9 +56,9 @@ Default test focus is logic and service layers. Visual tests are optional and ad
 
 1. Prefer presentational components that receive data via props and emit typed callbacks.
 2. Keep rendering and styling concerns in components; keep orchestration in pages/services.
-3. Use semantic HTML and accessible labels with Mantine inputs and controls.
+3. Use semantic HTML and accessible labels with MUI inputs and controls.
 4. Preserve current design system usage and established page layout conventions.
-5. Mantine v7 prop changes apply (`spacing` -> `gap` on `Stack` and related APIs).
+5. Style through MUI's system — `sx`, `styled()`, and the theme in `theme/` — not ad-hoc inline styles or new CSS files. Extend shared appearance via `theme/customizations/` rather than repeating overrides per component.
 
 ## Hooks and Effects
 
@@ -77,7 +77,7 @@ Default test focus is logic and service layers. Visual tests are optional and ad
 ## Error Handling and UX Feedback
 
 1. Never rely on `console.error` as final error handling.
-2. Pages should show clear user-facing errors via Mantine `Alert`/notifications.
+2. Pages should show clear user-facing errors via MUI `Alert`/`Snackbar`.
 3. Preserve existing success/info feedback patterns for long-running operations.
 4. Error messages should be actionable and, when possible, backend-detail aware.
 
@@ -102,10 +102,10 @@ When a page exceeds maintainable complexity, first extract logic to utility/serv
 
 ## Testing defaults
 
-- Priority: utilities and services.
-- Unit-test pure logic and orchestration by default.
+- Priority: utilities and services. The suite is vitest + Testing Library + jsdom; specs live in `frontend/src/__tests__/{services,utils}/*.test.ts` (`.ts`, not `.tsx` — they import plain modules).
+- Unit-test pure logic and orchestration by default. Stub `services/api.ts` with `vi.mock`; never hit a live backend.
 - Component/page tests are not required by default; add only for high-risk visual behavior.
-- Always run manual UI smoke checks for page-level changes (Upload, Review, Analytics, Coverage).
+- Always run UI smoke checks for page-level changes (Upload, Review, Analytics, Coverage) — screenshot the page, don't assume it renders.
 
 ## Development Workflow Standards
 
@@ -119,17 +119,17 @@ When a page exceeds maintainable complexity, first extract logic to utility/serv
 
 Docker-first is required for all project operations unless there is a clear blocker.
 
-**npm commands must run inside the frontend container, not on the host:**
+**npm commands must run inside the frontend container, not on the host.** The container is named `family-budget-web` (`family-budget-frontend` is the npm package name and is not a container — `docker exec` on it fails):
 
 ```bash
 # Install a package
-docker exec family-budget-frontend npm install <package>
+docker exec family-budget-web npm install <package>
 
 # Uninstall a package
-docker exec family-budget-frontend npm uninstall <package>
+docker exec family-budget-web npm uninstall <package>
 
 # Run any npm script
-docker exec family-budget-frontend npm run <script>
+docker exec family-budget-web npm run <script>
 ```
 
 Running npm directly on the host modifies `package.json` and `node_modules` outside the container's filesystem, which means the change won't be picked up by the running dev server and may produce inconsistent lock files.
@@ -144,9 +144,9 @@ Recommended patterns:
 
 - Start stack: `docker compose -f docker-compose.dev.yml up -d --build`
 - Backend tests: `docker exec family-budget-api python -m pytest -v`
-- Frontend commands: prefer running via compose service/container shell rather than host `npm`.
-
-If frontend container command wiring is missing, add/align compose service scripts first, then use containerized execution.
+- Frontend tests: `docker exec family-budget-web npm test`
+- Build check: `docker exec family-budget-web npm run build`
+- UI screenshot: `docker exec family-budget-web node scripts/screenshot.mjs http://localhost:5173/ /app/.screenshot.png` — `./frontend` is bind-mounted at `/app`, so it lands at `frontend/.screenshot.png`. Don't hand-roll a Playwright script: the container is Alpine/musl so Playwright's bundled Chromium won't run, and the script already maps `localhost:8000` to the API container.
 
 ## CSV upload specifics
 

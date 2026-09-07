@@ -10,9 +10,16 @@ services:
     ports:
       - "3306:3306"
     volumes:
-      - ./data/mariadb:/var/lib/mysql
+      # A named volume on the VM's ext4, not the 9p-mounted Windows drive. The
+      # datadir (96MB redo log, ibdata1, ibtmp1) was doing every page write as a
+      # 64KB 9p round-trip and filling the guest page cache, which is what kept
+      # the WSL VM pinned near its memory ceiling.
+      - mariadb_data:/var/lib/mysql
+      #- ./data/mariadb:/var/lib/mysql
     networks:
       - budget_network
+    # Uses ~130MB with the stock 128M InnoDB buffer pool.
+    mem_limit: 384m
     healthcheck:
       test: [
         "CMD-SHELL",
@@ -54,12 +61,17 @@ services:
       timeout: 3s
       retries: 15
       start_period: 30s
+    # Headroom over the ~180MB resident baseline for the retrain fit's transient
+    # workspace (~268MB peak with ML_MAX_FEATURES capped).
+    mem_limit: 640m
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   frontend:
+    image: family-budget-web:dev
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      target: dev
     container_name: family-budget-web
     ports:
       - "5173:5173"
@@ -73,8 +85,30 @@ services:
         condition: service_healthy
     networks:
       - budget_network
+    # PID 1 would otherwise be npm, which doesn't reap orphans - screenshot.mjs
+    # runs leaked chromium/crashpad zombies into the container.
+    init: true
+    # A ceiling for the occasional peak, not steady use: the dev server sits at
+    # ~105MB, and Chromium (scripts/screenshot.mjs, see CLAUDE.md) takes it to
+    # ~700MB. NOT sized for `npm run build` - tsc+rollup over MUI/AG Grid peaks
+    # near 1.8GB, and Node sizes its heap from this cgroup limit, so a build in
+    # the running container aborts. Build in the image, or raise this first:
+    #   docker update --memory 2g --memory-swap 2g family-budget-web
+    mem_limit: 1g
+    # vite's entry script directly, not `npm run dev` (nor `npx vite`, which is
+    # still npm): the wrapper is a second resident node process (~55MB) whose
+    # only job is to spawn this one.
+    # command: node node_modules/vite/bin/vite.js
     command: npm run dev
 
 networks:
   budget_network:
     driver: bridge
+
+volumes:
+  mariadb_data:
+    driver: local
+    driver_opts:
+      type: none
+      device: ./data/mariadb
+      o: bind

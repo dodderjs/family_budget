@@ -55,6 +55,9 @@ data/mariadb/
 logs/
 *.log
 
+# UI-verification screenshots (see CLAUDE.md "Test")
+frontend/.screenshot*.png
+
 # Docker
 .dockerignore
 
@@ -62,3 +65,9 @@ logs/
 example/
 backend/app/ml/models/model.pkl
 backend/app/ml/models/vectorizer.pkl
+
+# Pre-migration DB dump (see docker-compose.dev.yml mariadb_data volume)
+family_budget_backup_pre_volume.sql
+backend/app/ml/models/model.pkl
+backend/app/ml/models/vectorizer.pkl
+family_budget_migrate.sql
